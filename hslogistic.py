@@ -4,15 +4,19 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import arviz as az
 from scipy import stats
 from scipy.special import logit
-from scipy.optimize import minimize_scalar
+from scipy.optimize import minimize_scalar, curve_fit
+from sklearn.linear_model import LogisticRegression
 
 import jax
 import jax.numpy as jnp
 import numpyro as npyr
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS, Predictive
+from numpyro.infer.util import initialize_model
+import blackjax
 
 def hslogistic(X_u=None, X=None, y=None, slab_scale=None, slab_df=None, scale_global=None):
     nu_local = 1.
@@ -43,32 +47,102 @@ def hslogistic(X_u=None, X=None, y=None, slab_scale=None, slab_df=None, scale_gl
         npyr.sample("y", dist.Bernoulli(logits=logodds), obs=y)
 
 
+class _SamplesResult:
+    """Wrapper so that MCLMC results have the same interface as MCMC."""
+    def __init__(self, samples):
+        self._samples = samples
+    def get_samples(self):
+        return self._samples
+
+
 def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
         num_warmup=1000, num_samples=1000, num_chains=4,
-        target_accept_prob=0.95, max_tree_depth=12, rng_seed=0):
-    kernel = NUTS(
-        hslogistic,
-        target_accept_prob=target_accept_prob,
-        max_tree_depth=max_tree_depth,
-    )
-    mcmc = MCMC(
-        kernel,
-        num_warmup=num_warmup,
-        num_samples=num_samples,
-        num_chains=num_chains,
-    )
-    mcmc.run(
-        jax.random.PRNGKey(rng_seed),
-        X_u=X_u, X=X, y=y,
-        slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
-    )
-    mcmc.print_summary()
-    return mcmc
+        target_accept_prob=0.95, max_tree_depth=12, rng_seed=0,
+        sampler="nuts"):
+    model_kwargs = dict(X_u=X_u, X=X, y=y,
+                        slab_scale=slab_scale, slab_df=slab_df,
+                        scale_global=scale_global)
+    if sampler == "nuts":
+        kernel = NUTS(
+            hslogistic,
+            target_accept_prob=target_accept_prob,
+            max_tree_depth=max_tree_depth,
+        )
+        mcmc = MCMC(
+            kernel,
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            num_chains=num_chains,
+        )
+        mcmc.run(jax.random.PRNGKey(rng_seed), **model_kwargs)
+        mcmc.print_summary()
+        return mcmc
+    elif sampler == "mclmc":
+        return _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed)
+    else:
+        raise ValueError(f"Unknown sampler: {sampler!r}. Use 'nuts' or 'mclmc'.")
 
 
-def predict(mcmc, X_u_new, X_new, slab_scale=1.0, slab_df=4.0,
+def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
+    rng_key = jax.random.PRNGKey(rng_seed)
+    init_key, tune_key, run_key = jax.random.split(rng_key, 3)
+
+    init_params, potential_fn_gen, postprocess_fn, _ = initialize_model(
+        init_key, hslogistic,
+        model_kwargs=model_kwargs,
+        dynamic_args=False,
+    )
+    logdensity_fn = lambda position: -potential_fn_gen(position)
+    initial_position = init_params.z
+
+    initial_state = blackjax.mcmc.mclmc.init(
+        position=initial_position,
+        logdensity_fn=logdensity_fn,
+        rng_key=init_key,
+    )
+
+    kernel = lambda inverse_mass_matrix: blackjax.mcmc.mclmc.build_kernel(
+        logdensity_fn=logdensity_fn,
+        integrator=blackjax.mcmc.integrators.isokinetic_mclachlan,
+        inverse_mass_matrix=inverse_mass_matrix,
+    )
+
+    (state_after_tuning, sampler_params, _) = blackjax.mclmc_find_L_and_step_size(
+        mclmc_kernel=kernel,
+        num_steps=num_warmup,
+        state=initial_state,
+        rng_key=tune_key,
+        diagonal_preconditioning=False,
+    )
+
+    sampling_alg = blackjax.mclmc(
+        logdensity_fn,
+        L=sampler_params.L,
+        step_size=sampler_params.step_size,
+    )
+
+    _, samples_unconstrained = blackjax.util.run_inference_algorithm(
+        rng_key=run_key,
+        initial_state=state_after_tuning,
+        inference_algorithm=sampling_alg,
+        num_steps=num_samples,
+        transform=lambda state, info: state.position,
+        progress_bar=True,
+    )
+
+    # transform unconstrained samples to constrained space
+    constrained = jax.vmap(postprocess_fn)(samples_unconstrained)
+
+    print(f"MCLMC: L={float(sampler_params.L):.3f}, "
+          f"step_size={float(sampler_params.step_size):.4f}, "
+          f"{num_samples} samples")
+
+    return _SamplesResult(constrained)
+
+
+def predict(result, X_u_new, X_new, slab_scale=1.0, slab_df=4.0,
             scale_global=1.0, rng_seed=1):
-    posterior_samples = mcmc.get_samples()
+    posterior_samples = result.get_samples()
     predictive = Predictive(
         hslogistic,
         posterior_samples=posterior_samples,
@@ -152,13 +226,28 @@ def wevid(W_df, n_ctrls, n_cases):
     return {'xseq': xseq, 'x_stepsize': x_stepsize, 'f_ctrls': f_ctrls, 'f_cases': f_cases}
 
 
-def get_wevid(y, predicted_y):
+def recalibrate_probs(y, probs):
+    eps = 1e-8
+    probs = np.clip(np.asarray(probs, dtype=np.float64), eps, 1.0 - eps)
+    logit_p = logit(probs).reshape(-1, 1)
+    model = LogisticRegression(C=np.inf, solver='lbfgs')
+    model.fit(logit_p, np.asarray(y))
+    return model.predict_proba(logit_p)[:, 1]
+
+
+def Wdensities(y, predicted_y, recalibrate=True):
+    y = np.asarray(y)
+    predicted_y = np.asarray(predicted_y, dtype=np.float64)
+    if recalibrate:
+        predicted_y = recalibrate_probs(y, predicted_y)
     unique, counts = np.unique(y, return_counts=True)
     y_counts = dict(zip(unique, counts))
     n_ctrls = y_counts[0]
     n_cases = y_counts[1]
     logodds_prior = logit(n_cases / (n_ctrls + n_cases))
 
+    eps = 1e-8
+    predicted_y = np.clip(predicted_y, eps, 1.0 - eps)
     W = logit(predicted_y) - logodds_prior
     W_df = pd.DataFrame({'y': y, 'W': W})
     return wevid(W_df, n_ctrls, n_cases)
@@ -168,6 +257,136 @@ def get_info_discrim(w):
     info_discrim = ((w["xseq"] * w["f_cases"]).sum()
                     - (w["xseq"] * w["f_ctrls"]).sum()) * w["x_stepsize"] * 0.5 / np.log(2)
     return round(info_discrim, 2)
+
+
+def log_score(y, probs):
+    eps = 1e-15
+    probs = np.clip(np.asarray(probs, dtype=np.float64), eps, 1.0 - eps)
+    y = np.asarray(y)
+    return float(np.sum(y * np.log(probs) + (1.0 - y) * np.log(1.0 - probs)))
+
+
+def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
+                  scale_global=1.0, num_warmup=1000, num_samples=1000,
+                  num_chains=4, target_accept_prob=0.95, max_tree_depth=12,
+                  rng_seed=0, sampler="nuts"):
+    X_u = np.asarray(X_u)
+    X = np.asarray(X)
+    y = np.asarray(y)
+    N = X.shape[0]
+    indices = np.arange(N)
+    rng = np.random.RandomState(rng_seed)
+    rng.shuffle(indices)
+    folds = np.array_split(indices, K)
+
+    all_y = []
+    all_probs = []
+    for k, test_idx in enumerate(folds):
+        train_idx = np.concatenate([folds[j] for j in range(K) if j != k])
+        print(f"\n--- Fold {k+1}/{K}: train={len(train_idx)}, test={len(test_idx)} ---")
+        result_k = fit(
+            jnp.array(X_u[train_idx]), jnp.array(X[train_idx]),
+            jnp.array(y[train_idx]),
+            slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
+            num_warmup=num_warmup, num_samples=num_samples,
+            num_chains=num_chains, target_accept_prob=target_accept_prob,
+            max_tree_depth=max_tree_depth, rng_seed=rng_seed + k,
+            sampler=sampler,
+        )
+        probs_k = predict(
+            result_k, jnp.array(X_u[test_idx]), jnp.array(X[test_idx]),
+            slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
+            rng_seed=rng_seed + k,
+        )
+        all_y.append(y[test_idx])
+        all_probs.append(np.array(probs_k.mean(axis=0)))
+
+    all_y = np.concatenate(all_y)
+    all_probs = np.concatenate(all_probs)
+
+    c_stat = cstatistic(all_y, all_probs)
+    w = Wdensities(all_y, all_probs, recalibrate=True)
+    info_discrim = get_info_discrim(w)
+    lscore = log_score(all_y, all_probs)
+
+    print(f"\n{K}-fold cross-validation (N={N}):")
+    print(f"  C-statistic                            = {c_stat:.3f}")
+    print(f"  Expected information for discrimination = {info_discrim} bits")
+    print(f"  Logarithmic score                      = {lscore:.3f}")
+
+    return {'y': all_y, 'probs': all_probs, 'c_stat': c_stat,
+            'info_discrim': info_discrim, 'log_score': lscore, 'wevid': w}
+
+
+def learning_curve(X_u, X, y, K_values=(2, 3, 4, 5), slab_scale=1.0,
+                   slab_df=4.0, scale_global=1.0, num_warmup=1000,
+                   num_samples=1000, num_chains=4, target_accept_prob=0.95,
+                   max_tree_depth=12, rng_seed=0, sampler="nuts"):
+    N = X.shape[0]
+    train_sizes = []
+    info_values = []
+    for K in K_values:
+        n_train = int(N * (K - 1) / K)
+        print(f"\n{'='*60}")
+        print(f"K={K}  (train size ~ {n_train})")
+        print(f"{'='*60}")
+        cv = crossvalidate(
+            X_u, X, y, K=K,
+            slab_scale=slab_scale, slab_df=slab_df,
+            scale_global=scale_global, num_warmup=num_warmup,
+            num_samples=num_samples, num_chains=num_chains,
+            target_accept_prob=target_accept_prob,
+            max_tree_depth=max_tree_depth, rng_seed=rng_seed,
+            sampler=sampler,
+        )
+        train_sizes.append(n_train)
+        info_values.append(cv["info_discrim"])
+    return np.array(train_sizes), np.array(info_values)
+
+
+def plot_learning_curve(train_sizes, info_values, filestem):
+    def _saturation(n, a, b):
+        return a * n / (b + n)
+
+    popt, _ = curve_fit(_saturation, train_sizes, info_values,
+                        p0=[max(info_values) * 2, train_sizes[0]],
+                        bounds=([0, 0], [np.inf, np.inf]))
+    a_fit, b_fit = popt
+
+    plt.figure()
+    plt.plot(train_sizes, info_values, "ko", markersize=7, label="CV estimates")
+    n_curve = np.linspace(0, train_sizes[-1] * 1.2, 200)
+    plt.plot(n_curve, _saturation(n_curve, a_fit, b_fit), "b-",
+             label=rf"$\Lambda(n) = {a_fit:.2f}\,n\,/\,({b_fit:.0f} + n)$")
+    plt.xlabel("Training set size")
+    plt.ylabel("Expected information for discrimination (bits)")
+    plt.legend()
+    plt.xlim(left=0)
+    plt.ylim(bottom=0)
+    outpath = filestem + "_learning_curve.pdf"
+    plt.savefig(outpath)
+    plt.close()
+
+    print(f"\nFitted curve: Lambda(n) = {a_fit:.2f} * n / ({b_fit:.0f} + n)")
+    print(f"  Asymptote (a) = {a_fit:.2f} bits")
+    print(f"  Half-max (b)  = {b_fit:.0f} observations")
+    return outpath
+
+
+def plot_pair_diagnostic(mcmc, filestem):
+    idata = az.from_numpyro(mcmc)
+    ax = az.plot_pair(
+        idata,
+        var_names=["log_tau", "log_eta"],
+        divergences=True,
+        divergences_kwargs={"color": "red", "marker": "o", "markersize": 5},
+        scatter_kwargs={"alpha": 0.5, "s": 16},
+    )
+    outpath = filestem + "_logtau_logeta.pdf"
+    fig = ax.get_figure() if hasattr(ax, "get_figure") else ax.ravel()[0].get_figure()
+    fig.savefig(outpath)
+    plt.close(fig)
+    return outpath
 
 
 def plot_wevid(w, filestem):
@@ -241,26 +460,14 @@ if __name__ == "__main__":
           f"90% CI=[{float(jnp.percentile(m_eff, 5)):.2f}, "
           f"{float(jnp.percentile(m_eff, 95)):.2f}]")
 
-    # generate test dataset from the same DGP
-    N_test = 500
-    X_test = np.random.randn(N_test, J).astype(np.float32)
-    X_u_test = np.ones((N_test, U), dtype=np.float32)
-    logits_test = intercept + X_test @ beta_true
-    y_test = np.random.binomial(1, 1.0 / (1.0 + np.exp(-logits_test))).astype(np.float32)
-
-    # posterior predictive probabilities on test set
-    probs_test = predict(
-        mcmc, jnp.array(X_u_test), jnp.array(X_test),
+    # Learning curve: info for discrimination vs training size
+    train_sizes, info_values = learning_curve(
+        X_u, X, y, K_values=(2, 3, 4, 5),
         slab_scale=2.0, slab_df=4.0, scale_global=scale_global,
+        num_warmup=500, num_samples=500, num_chains=2, rng_seed=0,
     )
-    mean_probs_test = probs_test.mean(axis=0)
+    outpath3 = plot_learning_curve(train_sizes, info_values, "hslogistic")
+    print(f"Plot saved to {outpath3}")
 
-    c_stat = cstatistic(y_test, mean_probs_test)
-    w = get_wevid(np.array(y_test), np.array(mean_probs_test))
-    info_discrim = get_info_discrim(w)
-    print(f"\nTest set (N={N_test}):")
-    print(f"  C-statistic                        = {c_stat:.3f}")
-    print(f"  Expected information for discrimination = {info_discrim} bits")
-
-    outpath = plot_wevid(w, "hslogistic")
-    print(f"\nPlot saved to {outpath}")
+    outpath2 = plot_pair_diagnostic(mcmc, "hslogistic")
+    print(f"Plot saved to {outpath2}")
