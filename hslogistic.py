@@ -10,8 +10,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import arviz as az
 from scipy import stats
-from scipy.special import logit
-from scipy.optimize import minimize_scalar, curve_fit
+from scipy.special import logit, expit
+from scipy.optimize import minimize_scalar, minimize, curve_fit
 from sklearn.linear_model import LogisticRegression
 
 import jax
@@ -513,6 +513,131 @@ def plot_wevid(w, filestem):
     return outpath
 
 
+def _project_onto_submodel(mu, Z):
+    """Project reference model probabilities onto a submodel.
+
+    Fits logistic regression with soft targets by minimizing
+    KL(p_ref || p_sub) = sum_i [mu_i log(mu_i/p_i) + (1-mu_i) log((1-mu_i)/(1-p_i))].
+
+    Parameters
+    ----------
+    mu : ndarray (N,)
+        Reference model posterior mean probabilities.
+    Z : ndarray (N, d)
+        Design matrix for the submodel.
+
+    Returns
+    -------
+    w : ndarray (d,)
+        Fitted submodel coefficients.
+    kl : float
+        KL divergence from reference to submodel.
+    """
+    N, d = Z.shape
+    eps = 1e-12
+    mu_safe = np.clip(mu, eps, 1.0 - eps)
+
+    # negative entropy of reference (constant w.r.t. w)
+    neg_entropy = np.sum(mu_safe * np.log(mu_safe) + (1.0 - mu_safe) * np.log(1.0 - mu_safe))
+
+    def objective(w):
+        logits = Z @ w
+        p = expit(logits)
+        # cross-entropy: -sum [mu log p + (1-mu) log(1-p)]
+        # use numerically stable form via log-sum-exp
+        cross_ent = np.sum(-mu_safe * logits + np.logaddexp(0.0, logits))
+        kl = cross_ent + neg_entropy
+        grad = Z.T @ (p - mu_safe)
+        return kl, grad
+
+    w0 = np.zeros(d)
+    res = minimize(objective, w0, method="L-BFGS-B", jac=True)
+    return res.x, res.fun
+
+
+def projpred_forward_search(result, X_u, X, V=5):
+    """Projection predictive forward search (Piironen & Vehtari).
+
+    Parameters
+    ----------
+    result : MCMC or _SamplesResult
+        Fitted reference model.
+    X_u : ndarray (N, U)
+        Unpenalized design matrix.
+    X : ndarray (N, J)
+        Penalized design matrix.
+    V : int
+        Maximum number of penalized covariates to select.
+
+    Returns
+    -------
+    selected : list of int
+        Indices of selected penalized covariates in order.
+    kl_path : list of float
+        KL divergence at each step (length V).
+    kl_null : float
+        KL divergence for null submodel (X_u only).
+    """
+    X_u = np.asarray(X_u)
+    X = np.asarray(X)
+    J = X.shape[1]
+
+    if V > J:
+        import warnings
+        warnings.warn(f"V={V} > J={J}; capping at J={J}")
+        V = J
+
+    # reference probabilities: average expit(logodds) over posterior samples
+    logodds = np.asarray(result.get_samples()["logodds"])
+    mu = expit(logodds).mean(axis=0)
+
+    # null-model KL (unpenalized covariates only)
+    _, kl_null = _project_onto_submodel(mu, X_u)
+
+    selected = []
+    remaining = list(range(J))
+    kl_path = []
+
+    for v in range(V):
+        best_kl = np.inf
+        best_j = None
+        Z_base = np.hstack([X_u] + [X[:, [j]] for j in selected]) if selected else X_u
+        for j in remaining:
+            Z_cand = np.hstack([Z_base, X[:, [j]]])
+            _, kl = _project_onto_submodel(mu, Z_cand)
+            if kl < best_kl:
+                best_kl = kl
+                best_j = j
+        selected.append(best_j)
+        remaining.remove(best_j)
+        kl_path.append(best_kl)
+        print(f"  step {v+1}: selected X[{best_j}], KL={best_kl:.6f}")
+
+    return selected, kl_path, kl_null
+
+
+def plot_projpred(selected, kl_path, kl_null, filestem):
+    """Plot KL divergence path from projection predictive forward search."""
+    steps = np.arange(len(kl_path) + 1)
+    kl_values = [kl_null] + list(kl_path)
+
+    plt.figure()
+    plt.plot(steps, kl_values, "ko-", markersize=7)
+    # annotate each selected variable
+    for i, j in enumerate(selected):
+        plt.annotate(f"X[{j}]", (i + 1, kl_path[i]),
+                     textcoords="offset points", xytext=(6, 6), fontsize=8)
+    plt.xlabel("Number of selected covariates")
+    plt.ylabel("KL divergence from reference model")
+    plt.title("Projection predictive forward search")
+    plt.xlim(-0.3, len(kl_path) + 0.3)
+    outpath = filestem + "_projpred.pdf"
+    plt.savefig(outpath)
+    plt.close()
+    print(f"Plot saved to {outpath}")
+    return outpath
+
+
 if __name__ == "__main__":
 
     np.random.seed(42)
@@ -584,3 +709,15 @@ if __name__ == "__main__":
 
     outpath2 = plot_pair_diagnostic(mcmc, "hslogistic")
     print(f"Plot saved to {outpath2}")
+
+    # Projection predictive forward search
+    print("\n" + "=" * 60)
+    print("Projection predictive forward search")
+    print("=" * 60)
+    selected, kl_path, kl_null = projpred_forward_search(mcmc, X_u, X, V=5)
+    print(f"\nSelected covariates (in order): {selected}")
+    true_active = set(np.where(beta_true != 0)[0])
+    print(f"True active covariates: {sorted(true_active)}")
+    print(f"KL null (intercept only): {kl_null:.6f}")
+    print(f"KL path: {[f'{k:.6f}' for k in kl_path]}")
+    plot_projpred(selected, kl_path, kl_null, "hslogistic")
