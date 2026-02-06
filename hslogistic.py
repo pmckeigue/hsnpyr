@@ -1,4 +1,8 @@
 
+import os
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
+
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -15,6 +19,7 @@ import jax.numpy as jnp
 import numpyro as npyr
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS, Predictive
+from numpyro.diagnostics import effective_sample_size, split_gelman_rubin
 from numpyro.infer.util import initialize_model
 import blackjax
 
@@ -266,43 +271,114 @@ def log_score(y, probs):
     return float(np.sum(y * np.log(probs) + (1.0 - y) * np.log(1.0 - probs)))
 
 
+def _get_available_memory_bytes():
+    """Read available memory from /proc/meminfo (Linux)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024  # kB to bytes
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+    return None
+
+
+def _estimate_fold_memory_bytes(N_train, U, J, num_chains, num_samples):
+    """Rough estimate of memory needed per CV fold in bytes."""
+    n_params = U + J * 4 + 4  # beta_u, z/aux1/aux2_local per J, plus globals
+    samples_bytes = num_chains * num_samples * n_params * 4
+    data_bytes = N_train * (J + U + 1) * 4
+    # 3x safety factor for JAX intermediates during sampling
+    model_bytes = int((samples_bytes + data_bytes) * 3)
+    # baseline for JAX/XLA runtime + JIT compilation cache per process
+    jax_baseline = 512 * 1024 * 1024  # 512 MB
+    return model_bytes + jax_baseline
+
+
+def _cv_fold_worker(fold_args):
+    """Run fit + predict for a single CV fold (module-level for pickling)."""
+    (k, K, train_idx, test_idx, X_u, X, y,
+     slab_scale, slab_df, scale_global,
+     num_warmup, num_samples, num_chains,
+     target_accept_prob, max_tree_depth, rng_seed, sampler) = fold_args
+
+    print(f"\n--- Fold {k+1}/{K}: train={len(train_idx)}, test={len(test_idx)} ---")
+    result_k = fit(
+        jnp.array(X_u[train_idx]), jnp.array(X[train_idx]),
+        jnp.array(y[train_idx]),
+        slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
+        num_warmup=num_warmup, num_samples=num_samples,
+        num_chains=num_chains, target_accept_prob=target_accept_prob,
+        max_tree_depth=max_tree_depth, rng_seed=rng_seed + k,
+        sampler=sampler,
+    )
+    probs_k = predict(
+        result_k, jnp.array(X_u[test_idx]), jnp.array(X[test_idx]),
+        slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
+        rng_seed=rng_seed + k,
+    )
+    return k, y[test_idx], np.array(probs_k.mean(axis=0))
+
+
 def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
                   scale_global=1.0, num_warmup=1000, num_samples=1000,
                   num_chains=4, target_accept_prob=0.95, max_tree_depth=12,
-                  rng_seed=0, sampler="nuts"):
+                  rng_seed=0, sampler="nuts", max_workers=None):
     X_u = np.asarray(X_u)
     X = np.asarray(X)
     y = np.asarray(y)
     N = X.shape[0]
+    U = X_u.shape[1]
+    J = X.shape[1]
     indices = np.arange(N)
     rng = np.random.RandomState(rng_seed)
     rng.shuffle(indices)
     folds = np.array_split(indices, K)
 
-    all_y = []
-    all_probs = []
-    for k, test_idx in enumerate(folds):
-        train_idx = np.concatenate([folds[j] for j in range(K) if j != k])
-        print(f"\n--- Fold {k+1}/{K}: train={len(train_idx)}, test={len(test_idx)} ---")
-        result_k = fit(
-            jnp.array(X_u[train_idx]), jnp.array(X[train_idx]),
-            jnp.array(y[train_idx]),
-            slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
-            num_warmup=num_warmup, num_samples=num_samples,
-            num_chains=num_chains, target_accept_prob=target_accept_prob,
-            max_tree_depth=max_tree_depth, rng_seed=rng_seed + k,
-            sampler=sampler,
-        )
-        probs_k = predict(
-            result_k, jnp.array(X_u[test_idx]), jnp.array(X[test_idx]),
-            slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
-            rng_seed=rng_seed + k,
-        )
-        all_y.append(y[test_idx])
-        all_probs.append(np.array(probs_k.mean(axis=0)))
+    # determine number of parallel workers
+    n_cpus = os.cpu_count() or 1
+    n_workers = min(K, n_cpus)
 
-    all_y = np.concatenate(all_y)
-    all_probs = np.concatenate(all_probs)
+    mem_avail = _get_available_memory_bytes()
+    if mem_avail is not None:
+        N_train = int(N * (K - 1) / K)
+        mem_per_fold = _estimate_fold_memory_bytes(N_train, U, J,
+                                                   num_chains, num_samples)
+        mem_limit = max(1, int(mem_avail * 0.8) // mem_per_fold)
+        n_workers = min(n_workers, mem_limit)
+        print(f"Memory: {mem_avail / 1e9:.1f} GB available, "
+              f"~{mem_per_fold / 1e6:.0f} MB per fold, "
+              f"limit {mem_limit} parallel folds")
+
+    if max_workers is not None:
+        n_workers = min(n_workers, max_workers)
+    n_workers = max(1, n_workers)
+
+    # build fold arguments
+    fold_args = []
+    for k in range(K):
+        test_idx = folds[k]
+        train_idx = np.concatenate([folds[j] for j in range(K) if j != k])
+        fold_args.append((
+            k, K, train_idx, test_idx, X_u, X, y,
+            slab_scale, slab_df, scale_global,
+            num_warmup, num_samples, num_chains,
+            target_accept_prob, max_tree_depth, rng_seed, sampler,
+        ))
+
+    if n_workers > 1:
+        print(f"Running {K}-fold CV with {n_workers} parallel workers")
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+            results = list(pool.map(_cv_fold_worker, fold_args))
+    else:
+        print(f"Running {K}-fold CV sequentially")
+        results = [_cv_fold_worker(a) for a in fold_args]
+
+    # sort by fold index and collect
+    results.sort(key=lambda x: x[0])
+    all_y = np.concatenate([r[1] for r in results])
+    all_probs = np.concatenate([r[2] for r in results])
 
     c_stat = cstatistic(all_y, all_probs)
     w = Wdensities(all_y, all_probs, recalibrate=True)
@@ -321,7 +397,8 @@ def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
 def learning_curve(X_u, X, y, K_values=(2, 3, 4, 5), slab_scale=1.0,
                    slab_df=4.0, scale_global=1.0, num_warmup=1000,
                    num_samples=1000, num_chains=4, target_accept_prob=0.95,
-                   max_tree_depth=12, rng_seed=0, sampler="nuts"):
+                   max_tree_depth=12, rng_seed=0, sampler="nuts",
+                   max_workers=None):
     N = X.shape[0]
     train_sizes = []
     info_values = []
@@ -337,7 +414,7 @@ def learning_curve(X_u, X, y, K_values=(2, 3, 4, 5), slab_scale=1.0,
             num_samples=num_samples, num_chains=num_chains,
             target_accept_prob=target_accept_prob,
             max_tree_depth=max_tree_depth, rng_seed=rng_seed,
-            sampler=sampler,
+            sampler=sampler, max_workers=max_workers,
         )
         train_sizes.append(n_train)
         info_values.append(cv["info_discrim"])
@@ -371,6 +448,39 @@ def plot_learning_curve(train_sizes, info_values, filestem):
     print(f"  Asymptote (a) = {a_fit:.2f} bits")
     print(f"  Half-max (b)  = {b_fit:.0f} observations")
     return outpath
+
+
+def summary_report(mcmc, filepath):
+    chain_samples = mcmc.get_samples(group_by_chain=True)
+    var_names = ["tau", "eta"]
+    beta_u = chain_samples.get("beta_u")
+    if beta_u is not None:
+        U = beta_u.shape[-1]
+        var_names += [f"beta_u[{i}]" for i in range(U)]
+
+    rows = []
+    for name in var_names:
+        if name.startswith("beta_u["):
+            idx = int(name.split("[")[1].rstrip("]"))
+            x_chain = beta_u[..., idx]     # (chains, samples)
+            x_flat = x_chain.reshape(-1)
+        else:
+            x_chain = chain_samples[name]  # (chains, samples)
+            x_flat = x_chain.reshape(-1)
+        rows.append({
+            "parameter": name,
+            "mean": float(jnp.mean(x_flat)),
+            "q0.03": float(jnp.percentile(x_flat, 3)),
+            "q0.97": float(jnp.percentile(x_flat, 97)),
+            "n_eff": float(effective_sample_size(np.array(x_chain))),
+            "r_hat": float(split_gelman_rubin(np.array(x_chain))),
+        })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(filepath, index=False, float_format="%.4f")
+    print(df.to_string(index=False))
+    print(f"\nSummary saved to {filepath}")
+    return df
 
 
 def plot_pair_diagnostic(mcmc, filestem):
@@ -436,6 +546,9 @@ if __name__ == "__main__":
         slab_scale=2.0, slab_df=4.0, scale_global=scale_global,
         num_warmup=500, num_samples=500, num_chains=2, rng_seed=0,
     )
+
+    # summary report for full-dataset fit
+    summary_report(mcmc, "hslogistic_summary.csv")
 
     # posterior mean of penalized betas
     beta_samples = mcmc.get_samples()["beta"]
