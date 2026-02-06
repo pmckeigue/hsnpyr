@@ -513,7 +513,7 @@ def plot_wevid(w, filestem):
     return outpath
 
 
-def _project_onto_submodel(mu, Z):
+def _project_onto_submodel(mu, Z, w0=None):
     """Project reference model probabilities onto a submodel.
 
     Fits logistic regression with soft targets by minimizing
@@ -525,6 +525,8 @@ def _project_onto_submodel(mu, Z):
         Reference model posterior mean probabilities.
     Z : ndarray (N, d)
         Design matrix for the submodel.
+    w0 : ndarray (d,), optional
+        Initial coefficients for warm-starting. Defaults to zeros.
 
     Returns
     -------
@@ -550,13 +552,16 @@ def _project_onto_submodel(mu, Z):
         grad = Z.T @ (p - mu_safe)
         return kl, grad
 
-    w0 = np.zeros(d)
+    if w0 is None:
+        w0 = np.zeros(d)
     res = minimize(objective, w0, method="L-BFGS-B", jac=True)
     return res.x, res.fun
 
 
-def projpred_forward_search(result, X_u, X, V=5):
+def projpred_forward_search(result, X_u, X, V=5, prescreen_k=50):
     """Projection predictive forward search (Piironen & Vehtari).
+
+    Uses pre-screening and warm-starting for efficiency on large problems.
 
     Parameters
     ----------
@@ -568,6 +573,9 @@ def projpred_forward_search(result, X_u, X, V=5):
         Penalized design matrix.
     V : int
         Maximum number of penalized covariates to select.
+    prescreen_k : int
+        Number of top candidates to evaluate at each step.  When
+        J_remaining <= prescreen_k, all candidates are evaluated.
 
     Returns
     -------
@@ -592,25 +600,46 @@ def projpred_forward_search(result, X_u, X, V=5):
     mu = expit(logodds).mean(axis=0)
 
     # null-model KL (unpenalized covariates only)
-    _, kl_null = _project_onto_submodel(mu, X_u)
+    w_base, kl_null = _project_onto_submodel(mu, X_u)
 
     selected = []
     remaining = list(range(J))
     kl_path = []
 
     for v in range(V):
+        Z_base = np.hstack([X_u] + [X[:, [j]] for j in selected]) if selected else X_u
+
+        # current fitted probabilities for pre-screening
+        p_current = expit(Z_base @ w_base)
+        residual = p_current - mu  # (N,)
+
+        # pre-screen: rank candidates by |X_j^T residual| (gradient magnitude)
+        remaining_arr = np.array(remaining)
+        scores = np.abs(X[:, remaining_arr].T @ residual)
+        if len(remaining_arr) > prescreen_k:
+            top_idx = np.argpartition(scores, -prescreen_k)[-prescreen_k:]
+            candidates = remaining_arr[top_idx].tolist()
+            print(f"  step {v+1}: pre-screened {len(remaining_arr)} -> {len(candidates)} candidates")
+        else:
+            candidates = remaining
+
+        # warm-start: pad previous solution with 0 for the new coefficient
+        w0_template = np.append(w_base, 0.0)
+
         best_kl = np.inf
         best_j = None
-        Z_base = np.hstack([X_u] + [X[:, [j]] for j in selected]) if selected else X_u
-        for j in remaining:
+        best_w = None
+        for j in candidates:
             Z_cand = np.hstack([Z_base, X[:, [j]]])
-            _, kl = _project_onto_submodel(mu, Z_cand)
+            w, kl = _project_onto_submodel(mu, Z_cand, w0=w0_template)
             if kl < best_kl:
                 best_kl = kl
                 best_j = j
+                best_w = w
         selected.append(best_j)
         remaining.remove(best_j)
         kl_path.append(best_kl)
+        w_base = best_w
         print(f"  step {v+1}: selected X[{best_j}], KL={best_kl:.6f}")
 
     return selected, kl_path, kl_null
