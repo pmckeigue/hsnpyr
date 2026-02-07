@@ -9,7 +9,7 @@ evaluation and variable selection.
   unpenalized and penalized covariate groups
 - **Samplers**: NUTS (via NumPyro) and MCLMC (via BlackJAX)
 - **Evaluation**: C-statistic, logarithmic score, weight of evidence
-  densities, and expected information for discrimination
+  densities, and expected information for discrimination (McKeigue, 2019)
 - **K-fold cross-validation** with automatic memory-aware parallelism
 - **Learning curves** with saturation model fit
 - **Projection predictive forward search** (Piironen & Vehtari, 2020) for
@@ -140,6 +140,15 @@ In-sample (N=200):
   Logarithmic score                      = -71.467
 ```
 
+### Forest plot
+
+**Penalized betas** (posterior mean with 90% credible intervals):
+
+![Forest plot](img/forest.png)
+
+The three true signals (x0, x1, x2) are clearly separated from zero,
+while the noise covariates are shrunk towards zero by the horseshoe prior.
+
 ### Diagnostic plots
 
 **log(tau) vs log(eta) pairs** -- no divergences:
@@ -190,10 +199,15 @@ predictive information.
 | `plot_learning_curve` | Learning curve with fitted saturation model |
 | `plot_pair_diagnostic` | log(tau)--log(eta) scatter with divergences |
 | `plot_wevid` | Weight of evidence density plot |
+| `plot_forest` | Forest plot of penalized betas with 90% CIs |
 | `plot_projpred` | KL divergence path from projpred search |
 
 ## References
 
+- McKeigue, P. (2019). Quantifying performance of a diagnostic test as the
+  expected information for discrimination: Relation to the C-statistic.
+  *Statistical Methods in Medical Research*, 28(6):1841-1851.
+  doi: [10.1177/0962280218776989](https://doi.org/10.1177/0962280218776989).
 - Piironen, J. and Vehtari, A. (2017). Sparsity information and regularization
   in the horseshoe and other shrinkage priors. *Electronic Journal of
   Statistics*, 11(2):5018-5051.
