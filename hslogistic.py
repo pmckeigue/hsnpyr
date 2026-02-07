@@ -1127,6 +1127,14 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         (or None).
     """
     # --- 1. Extract arrays ---
+    used_cols = [y_col] + list(unpenalized_cols) + list(penalized_cols)
+    N_before = len(df)
+    df = df[used_cols].dropna()
+    N_after = len(df)
+    if N_after < N_before:
+        print(f"Dropped {N_before - N_after} rows with missing values "
+              f"({N_before} -> {N_after})")
+
     y = df[y_col].values.astype(np.float32)
     X = df[penalized_cols].values.astype(np.float32)
     N, J = X.shape
