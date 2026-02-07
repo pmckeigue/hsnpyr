@@ -1092,7 +1092,8 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         the number of penalized covariates.
     scale_global : float or None
         Global shrinkage scale.  If None, estimated as
-        ``p0 / (J - p0) / sqrt(N)``.
+        ``p0 / (J - p0) / sqrt(N * p * (1 - p))`` where *p* is the
+        proportion of cases.
     sampler : {"nuts", "mclmc"}
         Sampling algorithm.
     crossvalidate_ : bool
@@ -1144,7 +1145,8 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
     if scale_global is None:
         if p0 is None:
             p0 = max(1, J // 4)
-        scale_global = p0 / (J - p0) / np.sqrt(N)
+        p_cases = float(y.mean())
+        scale_global = p0 / (J - p0) / np.sqrt(N * p_cases * (1 - p_cases))
         print(f"scale_global estimated: p0={p0}, scale_global={scale_global:.4f}")
 
     # --- 3. Fit ---
