@@ -1104,21 +1104,29 @@ def plot_projpred(selected, kl_path, kl_null, filestem, var_names=None):
     steps = np.arange(len(kl_path) + 1)
     kl_values = [kl_null] + list(kl_path)
 
-    plt.figure()
-    plt.plot(steps, kl_values, "ko-", markersize=7)
-    # annotate each selected variable
+    fig, ax = plt.subplots()
+    ax.plot(steps, kl_values, "ko-", markersize=7)
+    # annotate each selected variable, alternating above/below to avoid overlap
     for i, j in enumerate(selected):
         label = var_names[j] if var_names is not None else f"X[{j}]"
-        plt.annotate(label, (i + 1, kl_path[i]),
-                     textcoords="offset points", xytext=(6, 6), fontsize=8)
-    plt.xlabel("Number of selected covariates")
-    plt.ylabel("KL divergence from reference model")
-    plt.title("Projection predictive forward search")
-    plt.xlim(-0.3, len(kl_path) + 0.3)
+        if i % 2 == 0:
+            xytext = (6, 8)
+            va = "bottom"
+        else:
+            xytext = (6, -8)
+            va = "top"
+        ax.annotate(label, (i + 1, kl_path[i]),
+                    textcoords="offset points", xytext=xytext,
+                    fontsize=8, va=va)
+    ax.set_xlabel("Number of selected covariates")
+    ax.set_ylabel("KL divergence from reference model")
+    ax.set_title("Projection predictive forward search")
+    ax.set_xlim(-0.3, len(kl_path) + 0.3)
+    fig.tight_layout()
     outpath = filestem + "_projpred.pdf"
-    plt.savefig(outpath)
+    fig.savefig(outpath)
     plt.show()
-    plt.close()
+    plt.close(fig)
     print(f"Plot saved to {outpath}")
     return outpath
 
