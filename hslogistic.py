@@ -747,6 +747,7 @@ def plot_learning_curve(train_sizes, info_values, filestem):
     plt.ylim(bottom=0)
     outpath = filestem + "_learning_curve.pdf"
     plt.savefig(outpath)
+    plt.show()
     plt.close()
 
     print(f"\nFitted curve: Lambda(n) = {a_fit:.2f} * n / ({b_fit:.0f} + n)")
@@ -852,6 +853,7 @@ def plot_pair_diagnostic(mcmc, filestem):
     outpath = filestem + "_logtau_logeta.pdf"
     fig = ax.get_figure() if hasattr(ax, "get_figure") else ax.ravel()[0].get_figure()
     fig.savefig(outpath)
+    plt.show()
     plt.close(fig)
     return outpath
 
@@ -882,6 +884,7 @@ def plot_wevid(w, filestem):
     plt.legend()
     outpath = filestem + "_wevid_dist.pdf"
     plt.savefig(outpath)
+    plt.show()
     plt.close()
     return outpath
 
@@ -1058,6 +1061,7 @@ def plot_projpred(selected, kl_path, kl_null, filestem, var_names=None):
     plt.xlim(-0.3, len(kl_path) + 0.3)
     outpath = filestem + "_projpred.pdf"
     plt.savefig(outpath)
+    plt.show()
     plt.close()
     print(f"Plot saved to {outpath}")
     return outpath
