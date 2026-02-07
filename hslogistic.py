@@ -133,6 +133,13 @@ def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
     MCMC or _SamplesResult
         Fitted sampler result with ``.get_samples()`` method.
     """
+    # Validate inputs: non-finite values cause BernoulliLogits errors
+    for name, arr in [("X_u", X_u), ("X", X), ("y", y)]:
+        if not jnp.all(jnp.isfinite(arr)):
+            n_bad = int((~jnp.isfinite(arr)).sum())
+            raise ValueError(
+                f"{name} contains {n_bad} non-finite values (NaN/Inf). "
+                f"Clean the data before fitting.")
     model_kwargs = dict(X_u=X_u, X=X, y=y,
                         slab_scale=slab_scale, slab_df=slab_df,
                         scale_global=scale_global)
@@ -1137,12 +1144,35 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
 
     y = df[y_col].values.astype(np.float32)
     X = df[penalized_cols].values.astype(np.float32)
-    N, J = X.shape
 
+    if unpenalized_cols:
+        X_u_raw = df[unpenalized_cols].values.astype(np.float32)
+    else:
+        X_u_raw = np.empty((len(y), 0), dtype=np.float32)
+
+    # Drop rows with non-finite values (Inf/-Inf/NaN from float32 overflow)
+    finite_mask = (np.isfinite(y)
+                   & np.all(np.isfinite(X), axis=1)
+                   & np.all(np.isfinite(X_u_raw), axis=1))
+    n_nonfinite = int((~finite_mask).sum())
+    if n_nonfinite > 0:
+        print(f"Dropped {n_nonfinite} rows with non-finite values "
+              f"(Inf/NaN after float32 conversion)")
+        y = y[finite_mask]
+        X = X[finite_mask]
+        X_u_raw = X_u_raw[finite_mask]
+
+    # Validate y contains only 0 and 1
+    unique_y = np.unique(y)
+    if not np.all((unique_y == 0) | (unique_y == 1)):
+        raise ValueError(
+            f"y_col '{y_col}' must be binary (0/1), "
+            f"got unique values: {unique_y}")
+
+    N, J = X.shape
     intercept_col = np.ones((N, 1), dtype=np.float32)
     if unpenalized_cols:
-        X_u = np.hstack([intercept_col,
-                         df[unpenalized_cols].values.astype(np.float32)])
+        X_u = np.hstack([intercept_col, X_u_raw])
     else:
         X_u = intercept_col
     U = X_u.shape[1]
