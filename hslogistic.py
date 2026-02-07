@@ -1176,8 +1176,9 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
     sampler : {"nuts", "mclmc"}
         Sampling algorithm.
     crossvalidate_ : bool
-        If True, run a learning curve (K=2..5) and 5-fold
-        cross-validation.
+        If True, run only cross-validation: a learning curve (K=2..5)
+        and 5-fold CV.  The full model fit, posterior summaries, and
+        projpred are skipped.
     num_warmup : int
         Warmup iterations per chain.
     num_samples : int
@@ -1199,11 +1200,12 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
     Returns
     -------
     dict
-        Keys: ``result`` (fitted sampler object), ``N`` (number of
-        observations), ``n_controls``, ``n_cases``,
-        ``unpenalized_cols``, ``penalized_cols``, ``beta_hat``,
-        ``m_eff``, ``insample``, ``cv`` (or None), ``projpred``
-        (or None).
+        When ``crossvalidate_=False`` (default): ``result``, ``N``,
+        ``n_controls``, ``n_cases``, ``unpenalized_cols``,
+        ``penalized_cols``, ``beta_hat``, ``m_eff``, ``insample``,
+        ``projpred`` (or None).
+        When ``crossvalidate_=True``: ``N``, ``n_controls``,
+        ``n_cases``, ``unpenalized_cols``, ``penalized_cols``, ``cv``.
     """
     # --- 1. Extract arrays ---
     used_cols = [y_col] + list(unpenalized_cols) + list(penalized_cols)
@@ -1268,7 +1270,39 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         scale_global = p0 / (J - p0) / np.sqrt(N * p_cases * (1 - p_cases))
         print(f"scale_global estimated: p0={p0}, scale_global={scale_global:.4f}")
 
-    # --- 3. Fit ---
+    n_cases = int(y.sum())
+    n_controls = int(len(y) - n_cases)
+
+    if crossvalidate_:
+        # --- Cross-validation only: learning curve + K-fold CV ---
+        train_sizes, info_values = learning_curve(
+            X_u, X, y, K_values=(2, 3, 4, 5),
+            slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
+            num_warmup=num_warmup, num_samples=num_samples,
+            num_chains=num_chains, target_accept_prob=target_accept_prob,
+            max_tree_depth=max_tree_depth, rng_seed=rng_seed,
+            sampler=sampler, max_workers=max_workers,
+        )
+        plot_learning_curve(train_sizes, info_values, filestem)
+
+        cv_result = crossvalidate(
+            X_u, X, y, K=5,
+            slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
+            num_warmup=num_warmup, num_samples=num_samples,
+            num_chains=num_chains, target_accept_prob=target_accept_prob,
+            max_tree_depth=max_tree_depth, rng_seed=rng_seed,
+            sampler=sampler, max_workers=max_workers,
+        )
+        plot_wevid(cv_result["wevid"], filestem + "_cv")
+
+        return {
+            "N": N, "n_controls": n_controls, "n_cases": n_cases,
+            "unpenalized_cols": ["Intercept"] + list(unpenalized_cols),
+            "penalized_cols": list(penalized_cols),
+            "cv": cv_result,
+        }
+
+    # --- 3. Fit full model ---
     result = fit(
         jnp.array(X_u), jnp.array(X), jnp.array(y),
         slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
@@ -1327,30 +1361,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         plot_pair_diagnostic(result, filestem)
     plot_wevid(w, filestem)
 
-    # --- 5. Cross-validation ---
-    cv_result = None
-    if crossvalidate_:
-        train_sizes, info_values = learning_curve(
-            X_u, X, y, K_values=(2, 3, 4, 5),
-            slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
-            num_warmup=num_warmup, num_samples=num_samples,
-            num_chains=num_chains, target_accept_prob=target_accept_prob,
-            max_tree_depth=max_tree_depth, rng_seed=rng_seed,
-            sampler=sampler, max_workers=max_workers,
-        )
-        plot_learning_curve(train_sizes, info_values, filestem)
-
-        cv_result = crossvalidate(
-            X_u, X, y, K=5,
-            slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
-            num_warmup=num_warmup, num_samples=num_samples,
-            num_chains=num_chains, target_accept_prob=target_accept_prob,
-            max_tree_depth=max_tree_depth, rng_seed=rng_seed,
-            sampler=sampler, max_workers=max_workers,
-        )
-        plot_wevid(cv_result["wevid"], filestem + "_cv")
-
-    # --- 6. Projpred ---
+    # --- 5. Projpred ---
     projpred_result = None
     if projpred_V is not None:
         print("\n" + "=" * 60)
@@ -1368,16 +1379,14 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
                            "kl_null": kl_null,
                            "selected_names": [penalized_cols[j] for j in selected]}
 
-    # --- 7. Return ---
-    n_cases = int(y.sum())
-    n_controls = int(len(y) - n_cases)
+    # --- 6. Return ---
     return {
         "result": result,
         "N": N, "n_controls": n_controls, "n_cases": n_cases,
         "unpenalized_cols": ["Intercept"] + list(unpenalized_cols),
         "penalized_cols": list(penalized_cols),
         "beta_hat": beta_hat, "m_eff": np.array(m_eff),
-        "insample": insample, "cv": cv_result, "projpred": projpred_result,
+        "insample": insample, "projpred": projpred_result,
     }
 
 
