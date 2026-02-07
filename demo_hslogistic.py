@@ -5,6 +5,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import numpy as np
+import pandas as pd
 import jax.numpy as jnp
 
 import hslogistic as hs
@@ -92,6 +93,27 @@ def main():
     print(f"KL null (intercept only): {kl_null:.6f}")
     print(f"KL path: {[f'{k:.6f}' for k in kl_path]}")
     hs.plot_projpred(selected, kl_path, kl_null, "hslogistic")
+
+    # ---- run_analysis: high-level DataFrame interface ----
+    print("\n" + "=" * 60)
+    print("run_analysis demo (DataFrame interface)")
+    print("=" * 60)
+
+    penalized_names = [f"x{j}" for j in range(J)]
+    data = {col: X[:, j] for j, col in enumerate(penalized_names)}
+    data["outcome"] = y
+    df = pd.DataFrame(data)
+
+    out = hs.run_analysis(
+        df, y_col="outcome",
+        unpenalized_cols=[],
+        penalized_cols=penalized_names,
+        filestem="hslogistic_ra",
+        slab_scale=2.0, slab_df=4.0,
+        num_warmup=500, num_samples=500, num_chains=2,
+        rng_seed=0, projpred_V=5,
+    )
+    print(f"\nrun_analysis returned keys: {sorted(out.keys())}")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ __all__ = [
     "projpred_forward_search",
     "plot_learning_curve", "plot_pair_diagnostic",
     "plot_wevid", "plot_projpred",
+    "run_analysis",
 ]
 
 
@@ -459,31 +460,67 @@ def plot_learning_curve(train_sizes, info_values, filestem):
     return outpath
 
 
-def summary_report(mcmc, filepath):
-    chain_samples = mcmc.get_samples(group_by_chain=True)
-    var_names = ["tau", "eta"]
-    beta_u = chain_samples.get("beta_u")
-    if beta_u is not None:
-        U = beta_u.shape[-1]
-        var_names += [f"beta_u[{i}]" for i in range(U)]
+def summary_report(mcmc, filepath, unpenalized_names=None,
+                    penalized_names=None):
+    """Posterior summary table saved to CSV.
 
-    rows = []
-    for name in var_names:
-        if name.startswith("beta_u["):
-            idx = int(name.split("[")[1].rstrip("]"))
-            x_chain = beta_u[..., idx]     # (chains, samples)
-            x_flat = x_chain.reshape(-1)
-        else:
-            x_chain = chain_samples[name]  # (chains, samples)
-            x_flat = x_chain.reshape(-1)
-        rows.append({
+    Parameters
+    ----------
+    mcmc : MCMC
+        Fitted NUTS result (must support ``group_by_chain``).
+    filepath : str
+        Path for the output CSV.
+    unpenalized_names : list of str, optional
+        Display names for beta_u parameters (length U).  When provided,
+        ``beta_u[0]`` is labelled ``unpenalized_names[0]`` (typically
+        ``"Intercept"``), etc.  Default ``None`` keeps ``beta_u[i]``.
+    penalized_names : list of str, optional
+        Display names for penalized covariates (length J).  When
+        provided, the top-5 penalized betas (by squared posterior mean)
+        are appended to the table using these names.
+    """
+    chain_samples = mcmc.get_samples(group_by_chain=True)
+
+    def _row(name, x_chain):
+        x_flat = x_chain.reshape(-1)
+        return {
             "parameter": name,
             "mean": float(jnp.mean(x_flat)),
             "q0.03": float(jnp.percentile(x_flat, 3)),
             "q0.97": float(jnp.percentile(x_flat, 97)),
             "n_eff": float(effective_sample_size(np.array(x_chain))),
             "r_hat": float(split_gelman_rubin(np.array(x_chain))),
-        })
+        }
+
+    rows = [_row("tau", chain_samples["tau"]),
+            _row("eta", chain_samples["eta"])]
+
+    beta_u = chain_samples.get("beta_u")
+    if beta_u is not None:
+        U = beta_u.shape[-1]
+        for i in range(U):
+            label = unpenalized_names[i] if unpenalized_names is not None else f"beta_u[{i}]"
+            rows.append(_row(label, beta_u[..., i]))
+
+    # top-5 penalized covariates by squared posterior mean
+    beta_chain = chain_samples.get("beta")      # (chains, samples, J)
+    if penalized_names is not None and beta_chain is not None:
+        beta_mean = np.array(beta_chain.reshape(-1, beta_chain.shape[-1]).mean(axis=0))
+        n_top = min(5, len(penalized_names))
+        top_idx = np.argsort(beta_mean ** 2)[-n_top:][::-1]
+        for idx in top_idx:
+            rows.append(_row(penalized_names[idx], beta_chain[..., idx]))
+
+    # effective number of nonzero coefficients (m_eff)
+    tau_ch = chain_samples["tau"][..., None]     # (chains, samples, 1)
+    eta_ch = chain_samples["eta"][..., None]
+    lambda_raw = (chain_samples["aux1_local"]
+                  * jnp.sqrt(chain_samples["aux2_local"]))
+    lambda_tilde_sq = ((eta_ch ** 2 * lambda_raw ** 2)
+                       / (eta_ch ** 2 + tau_ch ** 2 * lambda_raw ** 2))
+    kappa = 1.0 / (1.0 + tau_ch ** 2 * lambda_tilde_sq)
+    m_eff_chain = (1.0 - kappa).sum(axis=-1)    # (chains, samples)
+    rows.append(_row("m_eff", m_eff_chain))
 
     df = pd.DataFrame(rows)
     df.to_csv(filepath, index=False, float_format="%.4f")
@@ -654,7 +691,7 @@ def projpred_forward_search(result, X_u, X, V=5, prescreen_k=50):
     return selected, kl_path, kl_null
 
 
-def plot_projpred(selected, kl_path, kl_null, filestem):
+def plot_projpred(selected, kl_path, kl_null, filestem, var_names=None):
     """Plot KL divergence path from projection predictive forward search."""
     steps = np.arange(len(kl_path) + 1)
     kl_values = [kl_null] + list(kl_path)
@@ -663,7 +700,8 @@ def plot_projpred(selected, kl_path, kl_null, filestem):
     plt.plot(steps, kl_values, "ko-", markersize=7)
     # annotate each selected variable
     for i, j in enumerate(selected):
-        plt.annotate(f"X[{j}]", (i + 1, kl_path[i]),
+        label = var_names[j] if var_names is not None else f"X[{j}]"
+        plt.annotate(label, (i + 1, kl_path[i]),
                      textcoords="offset points", xytext=(6, 6), fontsize=8)
     plt.xlabel("Number of selected covariates")
     plt.ylabel("KL divergence from reference model")
@@ -674,5 +712,167 @@ def plot_projpred(selected, kl_path, kl_null, filestem):
     plt.close()
     print(f"Plot saved to {outpath}")
     return outpath
+
+
+def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
+                 slab_scale=2.0, slab_df=4.0, scale_global=None,
+                 sampler="nuts", crossvalidate_=False,
+                 num_warmup=1000, num_samples=1000, num_chains=4,
+                 target_accept_prob=0.95, max_tree_depth=12,
+                 rng_seed=0, projpred_V=None, max_workers=None):
+    """High-level entry point: takes a DataFrame and column names, runs full analysis.
+
+    Parameters
+    ----------
+    df : pandas DataFrame
+    y_col : str
+        Name of the binary outcome column.
+    unpenalized_cols : list of str
+        Columns for unpenalized covariates (an intercept is always added).
+    penalized_cols : list of str
+        Columns for penalized (horseshoe) covariates.
+    filestem : str
+        Prefix for all output files.
+    scale_global : float or None
+        If None, estimated as p0/(J-p0)/sqrt(N) with p0 = max(1, J//4).
+    crossvalidate_ : bool
+        If True, run learning curve and 5-fold cross-validation.
+    projpred_V : int or None
+        If not None, run projection predictive forward search selecting up to V variables.
+
+    Returns
+    -------
+    dict with keys: result, X_u, X, y, beta_hat, m_eff,
+                    insample, cv (or None), projpred (or None).
+    """
+    # --- 1. Extract arrays ---
+    y = df[y_col].values.astype(np.float32)
+    X = df[penalized_cols].values.astype(np.float32)
+    N, J = X.shape
+
+    intercept_col = np.ones((N, 1), dtype=np.float32)
+    if unpenalized_cols:
+        X_u = np.hstack([intercept_col,
+                         df[unpenalized_cols].values.astype(np.float32)])
+    else:
+        X_u = intercept_col
+    U = X_u.shape[1]
+
+    print(f"N={N}, U={U} (incl intercept), J={J}")
+
+    # --- 2. Default scale_global ---
+    if scale_global is None:
+        p0 = max(1, J // 4)
+        scale_global = p0 / (J - p0) / np.sqrt(N)
+        print(f"scale_global estimated: p0={p0}, scale_global={scale_global:.4f}")
+
+    # --- 3. Fit ---
+    result = fit(
+        jnp.array(X_u), jnp.array(X), jnp.array(y),
+        slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
+        num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains,
+        target_accept_prob=target_accept_prob, max_tree_depth=max_tree_depth,
+        rng_seed=rng_seed, sampler=sampler,
+    )
+
+    # --- 4. In-sample diagnostics ---
+    is_nuts = sampler == "nuts"
+
+    unpenalized_names = ["Intercept"] + list(unpenalized_cols)
+    if is_nuts:
+        summary_report(result, filestem + "_summary.csv",
+                       unpenalized_names=unpenalized_names,
+                       penalized_names=list(penalized_cols))
+
+    # posterior mean betas with column names
+    samples = result.get_samples()
+    beta_hat = np.array(samples["beta"].mean(axis=0))
+    print("\nPosterior mean penalized betas:")
+    for j, col in enumerate(penalized_cols):
+        print(f"  {col:>20s}: {beta_hat[j]:+.4f}")
+
+    # effective nonzero coefficients (m_eff)
+    tau = samples["tau"][:, None]
+    eta = samples["eta"][:, None]
+    lambda_raw = samples["aux1_local"] * jnp.sqrt(samples["aux2_local"])
+    lambda_tilde_sq = (eta**2 * lambda_raw**2) / (eta**2 + tau**2 * lambda_raw**2)
+    kappa = 1.0 / (1.0 + tau**2 * lambda_tilde_sq)
+    m_eff = (1.0 - kappa).sum(axis=1)
+    print(f"\nPosterior m_eff:  mean={float(m_eff.mean()):.2f}  "
+          f"median={float(jnp.median(m_eff)):.2f}  "
+          f"90% CI=[{float(jnp.percentile(m_eff, 5)):.2f}, "
+          f"{float(jnp.percentile(m_eff, 95)):.2f}]")
+
+    # in-sample predictions
+    probs = predict(
+        result, jnp.array(X_u), jnp.array(X),
+        slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
+        rng_seed=rng_seed + 1,
+    )
+    probs_mean = np.array(probs.mean(axis=0))
+    c_stat = cstatistic(y, probs_mean)
+    w = Wdensities(y, probs_mean, recalibrate=True)
+    info_discrim = get_info_discrim(w)
+    lscore = log_score(y, probs_mean)
+
+    print(f"\nIn-sample (N={N}):")
+    print(f"  C-statistic                            = {c_stat:.3f}")
+    print(f"  Expected information for discrimination = {info_discrim} bits")
+    print(f"  Logarithmic score                      = {lscore:.3f}")
+
+    insample = {"c_stat": c_stat, "info_discrim": info_discrim,
+                "log_score": lscore, "wevid": w}
+
+    if is_nuts:
+        plot_pair_diagnostic(result, filestem)
+    plot_wevid(w, filestem)
+
+    # --- 5. Cross-validation ---
+    cv_result = None
+    if crossvalidate_:
+        train_sizes, info_values = learning_curve(
+            X_u, X, y, K_values=(2, 3, 4, 5),
+            slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
+            num_warmup=num_warmup, num_samples=num_samples,
+            num_chains=num_chains, target_accept_prob=target_accept_prob,
+            max_tree_depth=max_tree_depth, rng_seed=rng_seed,
+            sampler=sampler, max_workers=max_workers,
+        )
+        plot_learning_curve(train_sizes, info_values, filestem)
+
+        cv_result = crossvalidate(
+            X_u, X, y, K=5,
+            slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
+            num_warmup=num_warmup, num_samples=num_samples,
+            num_chains=num_chains, target_accept_prob=target_accept_prob,
+            max_tree_depth=max_tree_depth, rng_seed=rng_seed,
+            sampler=sampler, max_workers=max_workers,
+        )
+        plot_wevid(cv_result["wevid"], filestem + "_cv")
+
+    # --- 6. Projpred ---
+    projpred_result = None
+    if projpred_V is not None:
+        print("\n" + "=" * 60)
+        print("Projection predictive forward search")
+        print("=" * 60)
+        selected, kl_path, kl_null = projpred_forward_search(
+            result, X_u, X, V=projpred_V,
+        )
+        print(f"\nSelected covariates (in order):")
+        for i, j in enumerate(selected):
+            print(f"  {i+1}. {penalized_cols[j]} (index {j})")
+        plot_projpred(selected, kl_path, kl_null, filestem,
+                      var_names=list(penalized_cols))
+        projpred_result = {"selected": selected, "kl_path": kl_path,
+                           "kl_null": kl_null,
+                           "selected_names": [penalized_cols[j] for j in selected]}
+
+    # --- 7. Return ---
+    return {
+        "result": result, "X_u": X_u, "X": X, "y": y,
+        "beta_hat": beta_hat, "m_eff": np.array(m_eff),
+        "insample": insample, "cv": cv_result, "projpred": projpred_result,
+    }
 
 
