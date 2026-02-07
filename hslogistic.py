@@ -1119,7 +1119,9 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
     Returns
     -------
     dict
-        Keys: ``result``, ``X_u``, ``X``, ``y``, ``beta_hat``,
+        Keys: ``result`` (fitted sampler object), ``N`` (number of
+        observations), ``n_controls``, ``n_cases``,
+        ``unpenalized_cols``, ``penalized_cols``, ``beta_hat``,
         ``m_eff``, ``insample``, ``cv`` (or None), ``projpred``
         (or None).
     """
@@ -1248,8 +1250,13 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
                            "selected_names": [penalized_cols[j] for j in selected]}
 
     # --- 7. Return ---
+    n_cases = int(y.sum())
+    n_controls = int(len(y) - n_cases)
     return {
-        "result": result, "X_u": X_u, "X": X, "y": y,
+        "result": result,
+        "N": N, "n_controls": n_controls, "n_cases": n_cases,
+        "unpenalized_cols": ["Intercept"] + list(unpenalized_cols),
+        "penalized_cols": list(penalized_cols),
         "beta_hat": beta_hat, "m_eff": np.array(m_eff),
         "insample": insample, "cv": cv_result, "projpred": projpred_result,
     }
