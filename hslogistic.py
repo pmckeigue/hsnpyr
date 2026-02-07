@@ -96,7 +96,7 @@ class _SamplesResult:
 def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
         num_warmup=1000, num_samples=1000, num_chains=4,
         target_accept_prob=0.95, max_tree_depth=12, rng_seed=0,
-        sampler="nuts"):
+        sampler="nuts", print_summary=True):
     """Fit the horseshoe logistic regression model via MCMC.
 
     Parameters
@@ -127,6 +127,8 @@ def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
         Random seed.
     sampler : {"nuts", "mclmc"}
         Sampling algorithm.
+    print_summary : bool
+        If True, print the full NumPyro summary table to stdout.
 
     Returns
     -------
@@ -156,7 +158,8 @@ def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
             num_chains=num_chains,
         )
         mcmc.run(jax.random.PRNGKey(rng_seed), **model_kwargs)
-        mcmc.print_summary()
+        if print_summary:
+            mcmc.print_summary()
         return mcmc
     elif sampler == "mclmc":
         return _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed)
@@ -1197,7 +1200,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
         num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains,
         target_accept_prob=target_accept_prob, max_tree_depth=max_tree_depth,
-        rng_seed=rng_seed, sampler=sampler,
+        rng_seed=rng_seed, sampler=sampler, print_summary=False,
     )
 
     # --- 4. In-sample diagnostics ---
