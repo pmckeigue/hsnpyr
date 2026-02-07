@@ -19,14 +19,19 @@ evaluation and variable selection.
 
 ## Installation
 
-Requires Python 3.10+. Install dependencies:
+Requires Python 3.10+. Install directly from GitHub:
 
 ```
-pip install numpy pandas matplotlib arviz scipy scikit-learn jax numpyro blackjax
+pip install git+https://github.com/pmckeigue/hsnpyr.git
 ```
 
-Then place `hslogistic.py` on your Python path, or install in development mode
-once a `pyproject.toml` is added.
+This pulls all dependencies automatically.  For a development install
+(editable, so local changes take effect immediately):
+
+```
+git clone https://github.com/pmckeigue/hsnpyr.git
+pip install -e hsnpyr
+```
 
 ## Quick start
 

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hsnpyr"
+version = "0.1.0"
+description = "Regularized horseshoe logistic regression in NumPyro"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "arviz",
+    "scipy",
+    "scikit-learn",
+    "jax",
+    "numpyro",
+    "blackjax",
+]
+
+[tool.setuptools]
+py-modules = ["hslogistic"]
