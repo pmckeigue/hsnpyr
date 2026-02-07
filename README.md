@@ -19,7 +19,7 @@ evaluation and variable selection.
 
 ## Installation
 
-Requires Python 3.10+. Install directly from GitHub:
+Requires Python 3.9+. Install directly from GitHub:
 
 ```
 pip install git+https://github.com/pmckeigue/hsnpyr.git

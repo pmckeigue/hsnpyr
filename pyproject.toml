@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "hsnpyr"
 version = "0.1.0"
 description = "Regularized horseshoe logistic regression in NumPyro"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
     "numpy",
     "pandas",
