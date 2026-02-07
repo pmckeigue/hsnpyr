@@ -28,7 +28,7 @@ __all__ = [
     "learning_curve", "summary_report",
     "projpred_forward_search",
     "plot_learning_curve", "plot_pair_diagnostic",
-    "plot_wevid", "plot_projpred",
+    "plot_wevid", "plot_forest", "plot_projpred",
     "run_analysis",
 ]
 
@@ -823,8 +823,12 @@ def summary_report(mcmc, filepath, unpenalized_names=None,
 
     df = pd.DataFrame(rows)
     df.to_csv(filepath, index=False, float_format="%.4f")
-    print(df.to_string(index=False))
-    print(f"\nSummary saved to {filepath}")
+    try:
+        from IPython.display import display
+        display(df)
+    except ImportError:
+        print(df.to_string(index=False))
+    print(f"Summary saved to {filepath}")
     return df
 
 
@@ -889,6 +893,55 @@ def plot_wevid(w, filestem):
     plt.savefig(outpath)
     plt.show()
     plt.close()
+    return outpath
+
+
+def plot_forest(beta_samples, penalized_names, filestem):
+    """Forest plot of penalized betas with 90% credible intervals.
+
+    Parameters
+    ----------
+    beta_samples : array (S, J)
+        Posterior samples of penalized coefficients.
+    penalized_names : list of str
+        Names of penalized covariates (length J).
+    filestem : str
+        Prefix for the output PDF file.
+
+    Returns
+    -------
+    str
+        Path to the saved plot.
+    """
+    beta_mean = np.array(beta_samples.mean(axis=0))
+    beta_lo = np.array(jnp.percentile(beta_samples, 5, axis=0))
+    beta_hi = np.array(jnp.percentile(beta_samples, 95, axis=0))
+
+    # Sort by absolute posterior mean (largest at top)
+    order = np.argsort(np.abs(beta_mean))
+    beta_mean = beta_mean[order]
+    beta_lo = beta_lo[order]
+    beta_hi = beta_hi[order]
+    names = [penalized_names[i] for i in order]
+
+    J = len(names)
+    fig, ax = plt.subplots(figsize=(6, max(3, 0.3 * J)))
+    y_pos = np.arange(J)
+    ax.axvline(0, color="grey", linewidth=0.8, linestyle="--")
+    ax.errorbar(beta_mean, y_pos,
+                xerr=[beta_mean - beta_lo, beta_hi - beta_mean],
+                fmt="o", color="steelblue", ecolor="steelblue",
+                elinewidth=1.5, capsize=3, markersize=4)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(names)
+    ax.set_xlabel("Coefficient (standardized)")
+    ax.set_title("Penalized betas (posterior mean, 90% CI)")
+    fig.tight_layout()
+    outpath = filestem + "_forest.pdf"
+    fig.savefig(outpath)
+    plt.show()
+    plt.close(fig)
+    print(f"Plot saved to {outpath}")
     return outpath
 
 
@@ -1072,7 +1125,7 @@ def plot_projpred(selected, kl_path, kl_null, filestem, var_names=None):
 
 def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
                  slab_scale=2.0, slab_df=4.0, p0=None, scale_global=None,
-                 sampler="nuts", crossvalidate_=False,
+                 standardize=True, sampler="nuts", crossvalidate_=False,
                  num_warmup=1000, num_samples=1000, num_chains=4,
                  target_accept_prob=0.95, max_tree_depth=12,
                  rng_seed=0, projpred_V=None, max_workers=None):
@@ -1108,6 +1161,10 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         Global shrinkage scale.  If None, estimated as
         ``p0 / (J - p0) / sqrt(N * p * (1 - p))`` where *p* is the
         proportion of cases.
+    standardize : bool
+        If True (default), centre and scale the penalized covariates to
+        zero mean and unit variance before fitting.  Posterior summaries
+        report coefficients on the standardized scale.
     sampler : {"nuts", "mclmc"}
         Sampling algorithm.
     crossvalidate_ : bool
@@ -1177,6 +1234,15 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
             f"got unique values: {unique_y}")
 
     N, J = X.shape
+
+    # Standardize penalized covariates
+    if standardize:
+        X_mean = X.mean(axis=0)
+        X_std = X.std(axis=0)
+        X_std[X_std == 0] = 1.0  # avoid division by zero for constant cols
+        X = (X - X_mean) / X_std
+        print("Penalized covariates standardized to zero mean, unit variance")
+
     intercept_col = np.ones((N, 1), dtype=np.float32)
     if unpenalized_cols:
         X_u = np.hstack([intercept_col, X_u_raw])
@@ -1212,12 +1278,10 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
                        unpenalized_names=unpenalized_names,
                        penalized_names=list(penalized_cols))
 
-    # posterior mean betas with column names
+    # posterior mean betas and forest plot
     samples = result.get_samples()
     beta_hat = np.array(samples["beta"].mean(axis=0))
-    print("\nPosterior mean penalized betas:")
-    for j, col in enumerate(penalized_cols):
-        print(f"  {col:>20s}: {beta_hat[j]:+.4f}")
+    plot_forest(samples["beta"], list(penalized_cols), filestem)
 
     # effective nonzero coefficients (m_eff)
     tau = samples["tau"][:, None]
