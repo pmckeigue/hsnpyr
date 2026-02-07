@@ -34,6 +34,29 @@ __all__ = [
 
 
 def hslogistic(X_u=None, X=None, y=None, slab_scale=None, slab_df=None, scale_global=None):
+    """NumPyro model for logistic regression with regularized horseshoe prior.
+
+    Unpenalized coefficients (beta_u) receive a wide Normal(0, 10) prior.
+    Penalized coefficients (beta) receive a regularized horseshoe prior
+    controlled by ``scale_global`` (tau), ``slab_scale`` (eta), and
+    ``slab_df``.
+
+    Parameters
+    ----------
+    X_u : ndarray (N, U)
+        Design matrix for unpenalized covariates (typically includes an
+        intercept column).
+    X : ndarray (N, J)
+        Design matrix for penalized covariates.
+    y : ndarray (N,)
+        Binary outcome (0/1).
+    slab_scale : float
+        Scale of the regularizing slab on large coefficients.
+    slab_df : float
+        Degrees of freedom for the slab inverse-gamma prior.
+    scale_global : float
+        Global shrinkage scale, controls overall sparsity.
+    """
     nu_local = 1.
     nu_global = 1.
     U = X_u.shape[1]
@@ -74,6 +97,42 @@ def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
         num_warmup=1000, num_samples=1000, num_chains=4,
         target_accept_prob=0.95, max_tree_depth=12, rng_seed=0,
         sampler="nuts"):
+    """Fit the horseshoe logistic regression model via MCMC.
+
+    Parameters
+    ----------
+    X_u : array (N, U)
+        Unpenalized design matrix.
+    X : array (N, J)
+        Penalized design matrix.
+    y : array (N,)
+        Binary outcome.
+    slab_scale : float
+        Regularizing slab scale.
+    slab_df : float
+        Slab inverse-gamma degrees of freedom.
+    scale_global : float
+        Global shrinkage scale.
+    num_warmup : int
+        Number of warmup (adaptation) iterations per chain.
+    num_samples : int
+        Number of posterior samples per chain.
+    num_chains : int
+        Number of MCMC chains.
+    target_accept_prob : float
+        NUTS target acceptance probability.
+    max_tree_depth : int
+        NUTS maximum tree depth.
+    rng_seed : int
+        Random seed.
+    sampler : {"nuts", "mclmc"}
+        Sampling algorithm.
+
+    Returns
+    -------
+    MCMC or _SamplesResult
+        Fitted sampler result with ``.get_samples()`` method.
+    """
     model_kwargs = dict(X_u=X_u, X=X, y=y,
                         slab_scale=slab_scale, slab_df=slab_df,
                         scale_global=scale_global)
@@ -99,6 +158,24 @@ def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
 
 
 def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
+    """Fit using the MCLMC sampler via BlackJAX.
+
+    Parameters
+    ----------
+    model_kwargs : dict
+        Arguments forwarded to the NumPyro model.
+    num_warmup : int
+        Tuning steps for step-size and trajectory-length selection.
+    num_samples : int
+        Number of posterior samples to draw.
+    rng_seed : int
+        Random seed.
+
+    Returns
+    -------
+    _SamplesResult
+        Wrapper around the constrained posterior samples.
+    """
     rng_key = jax.random.PRNGKey(rng_seed)
     init_key, tune_key, run_key = jax.random.split(rng_key, 3)
 
@@ -157,6 +234,26 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
 
 def predict(result, X_u_new, X_new, slab_scale=1.0, slab_df=4.0,
             scale_global=1.0, rng_seed=1):
+    """Compute posterior predictive probabilities for new observations.
+
+    Parameters
+    ----------
+    result : MCMC or _SamplesResult
+        Fitted model returned by :func:`fit`.
+    X_u_new : array (N_new, U)
+        Unpenalized design matrix for new data.
+    X_new : array (N_new, J)
+        Penalized design matrix for new data.
+    slab_scale, slab_df, scale_global : float
+        Must match the values used in :func:`fit`.
+    rng_seed : int
+        Random seed for the predictive.
+
+    Returns
+    -------
+    ndarray (S, N_new)
+        Predicted probabilities, one row per posterior sample.
+    """
     posterior_samples = result.get_samples()
     predictive = Predictive(
         hslogistic,
@@ -189,6 +286,26 @@ def cstatistic(y, probs):
 
 
 def reweight_densities(theta, n_ctrls, n_cases, fhat_ctrls, fhat_cases, xseq, wts):
+    """Reweight KDE densities so that control and case integrals are equal.
+
+    Parameters
+    ----------
+    theta : float
+        Reweighting parameter (optimised externally).
+    n_ctrls, n_cases : int
+        Number of controls and cases.
+    fhat_ctrls, fhat_cases : ndarray
+        Raw KDE densities evaluated on *xseq*.
+    xseq : ndarray
+        Grid of weight-of-evidence values.
+    wts : ndarray (len(xseq), 2)
+        Mixture weights for controls and cases at each grid point.
+
+    Returns
+    -------
+    DataFrame
+        Columns ``f_ctrls`` and ``f_cases``: reweighted densities.
+    """
     mean_ctrls = np.sum(fhat_ctrls * xseq) / np.sum(fhat_ctrls)
     mean_cases = np.sum(fhat_cases * xseq) / np.sum(fhat_cases)
     weights_ctrls = n_ctrls * np.exp(-theta * np.square(xseq - mean_ctrls))
@@ -205,12 +322,35 @@ def reweight_densities(theta, n_ctrls, n_cases, fhat_ctrls, fhat_cases, xseq, wt
 
 
 def error_integrals(theta, n_ctrls, n_cases, f0, f1, xseq, wts):
+    """Objective for density reweighting: absolute log-ratio of integrals.
+
+    Returns zero when the reweighted control and case densities integrate
+    to the same value, i.e. the densities are balanced.
+    """
     wdens = reweight_densities(theta, n_ctrls, n_cases, f0, f1, xseq, wts)
     obj = abs(np.log(np.sum(wdens["f_ctrls"]) / np.sum(wdens["f_cases"])))
     return obj
 
 
 def wevid(W_df, n_ctrls, n_cases):
+    """Compute weight-of-evidence density curves from a W DataFrame.
+
+    Estimates separate KDEs for controls and cases, reweights them so
+    their integrals match, and returns the adjusted density curves.
+
+    Parameters
+    ----------
+    W_df : DataFrame
+        Must contain columns ``y`` (0/1) and ``W`` (log-likelihood ratio
+        minus prior log-odds).
+    n_ctrls, n_cases : int
+        Number of controls and cases.
+
+    Returns
+    -------
+    dict
+        Keys ``xseq``, ``x_stepsize``, ``f_ctrls``, ``f_cases``.
+    """
     W0 = W_df.query("y==0")["W"]
     W1 = W_df.query("y==1")["W"]
     try:
@@ -242,6 +382,23 @@ def wevid(W_df, n_ctrls, n_cases):
 
 
 def recalibrate_probs(y, probs):
+    """Recalibrate predicted probabilities using Platt scaling.
+
+    Fits a univariate logistic regression of *y* on logit(*probs*) and
+    returns the recalibrated probabilities.
+
+    Parameters
+    ----------
+    y : array-like (N,)
+        Binary outcome.
+    probs : array-like (N,)
+        Predicted probabilities to recalibrate.
+
+    Returns
+    -------
+    ndarray (N,)
+        Recalibrated probabilities.
+    """
     eps = 1e-8
     probs = np.clip(np.asarray(probs, dtype=np.float64), eps, 1.0 - eps)
     logit_p = logit(probs).reshape(-1, 1)
@@ -251,6 +408,26 @@ def recalibrate_probs(y, probs):
 
 
 def Wdensities(y, predicted_y, recalibrate=True):
+    """Compute weight-of-evidence densities from predicted probabilities.
+
+    Converts predicted probabilities to log-likelihood-ratio weights,
+    optionally recalibrates them, and returns density curves via
+    :func:`wevid`.
+
+    Parameters
+    ----------
+    y : array-like (N,)
+        Binary outcome.
+    predicted_y : array-like (N,)
+        Predicted probabilities.
+    recalibrate : bool
+        If True, apply Platt scaling before computing W.
+
+    Returns
+    -------
+    dict
+        Keys ``xseq``, ``x_stepsize``, ``f_ctrls``, ``f_cases``.
+    """
     y = np.asarray(y)
     predicted_y = np.asarray(predicted_y, dtype=np.float64)
     if recalibrate:
@@ -269,12 +446,38 @@ def Wdensities(y, predicted_y, recalibrate=True):
 
 
 def get_info_discrim(w):
+    """Expected information for discrimination (bits) from W-densities.
+
+    Parameters
+    ----------
+    w : dict
+        Output of :func:`wevid` or :func:`Wdensities`.
+
+    Returns
+    -------
+    float
+        Information for discrimination, rounded to two decimal places.
+    """
     info_discrim = ((w["xseq"] * w["f_cases"]).sum()
                     - (w["xseq"] * w["f_ctrls"]).sum()) * w["x_stepsize"] * 0.5 / np.log(2)
     return round(info_discrim, 2)
 
 
 def log_score(y, probs):
+    """Logarithmic (log-likelihood) scoring rule.
+
+    Parameters
+    ----------
+    y : array-like (N,)
+        Binary outcome.
+    probs : array-like (N,)
+        Predicted probabilities.
+
+    Returns
+    -------
+    float
+        Sum of log-likelihoods: sum[y*log(p) + (1-y)*log(1-p)].
+    """
     eps = 1e-15
     probs = np.clip(np.asarray(probs, dtype=np.float64), eps, 1.0 - eps)
     y = np.asarray(y)
@@ -334,6 +537,40 @@ def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
                   scale_global=1.0, num_warmup=1000, num_samples=1000,
                   num_chains=4, target_accept_prob=0.95, max_tree_depth=12,
                   rng_seed=0, sampler="nuts", max_workers=None):
+    """K-fold cross-validation with automatic parallelisation.
+
+    Fits the model on K-1 folds and predicts the held-out fold,
+    then aggregates predictions to compute C-statistic, expected
+    information for discrimination, and log score.
+
+    Parameters
+    ----------
+    X_u, X, y : array-like
+        Design matrices and outcome (see :func:`fit`).
+    K : int
+        Number of folds.
+    slab_scale, slab_df, scale_global : float
+        Horseshoe prior parameters.
+    num_warmup, num_samples, num_chains : int
+        MCMC sampler settings.
+    target_accept_prob : float
+        NUTS target acceptance probability.
+    max_tree_depth : int
+        NUTS maximum tree depth.
+    rng_seed : int
+        Random seed (incremented per fold).
+    sampler : {"nuts", "mclmc"}
+        Sampling algorithm.
+    max_workers : int or None
+        Maximum parallel fold workers.  None uses all available CPUs
+        subject to a memory-based limit.
+
+    Returns
+    -------
+    dict
+        Keys: ``y``, ``probs``, ``c_stat``, ``info_discrim``,
+        ``log_score``, ``wevid``.
+    """
     X_u = np.asarray(X_u)
     X = np.asarray(X)
     y = np.asarray(y)
@@ -409,6 +646,38 @@ def learning_curve(X_u, X, y, K_values=(2, 3, 4, 5), slab_scale=1.0,
                    num_samples=1000, num_chains=4, target_accept_prob=0.95,
                    max_tree_depth=12, rng_seed=0, sampler="nuts",
                    max_workers=None):
+    """Learning curve: information for discrimination vs training size.
+
+    Runs :func:`crossvalidate` for each value of K and records how
+    discriminative performance varies with training-set size.
+
+    Parameters
+    ----------
+    X_u, X, y : array-like
+        Design matrices and outcome.
+    K_values : tuple of int
+        Fold counts to evaluate.  Each K yields a training size of
+        approximately N*(K-1)/K.
+    slab_scale, slab_df, scale_global : float
+        Horseshoe prior parameters.
+    num_warmup, num_samples, num_chains : int
+        MCMC sampler settings.
+    target_accept_prob, max_tree_depth : float, int
+        NUTS settings.
+    rng_seed : int
+        Random seed.
+    sampler : {"nuts", "mclmc"}
+        Sampling algorithm.
+    max_workers : int or None
+        Forwarded to :func:`crossvalidate`.
+
+    Returns
+    -------
+    train_sizes : ndarray
+        Training-set sizes.
+    info_values : ndarray
+        Corresponding information-for-discrimination values (bits).
+    """
     N = X.shape[0]
     train_sizes = []
     info_values = []
@@ -432,6 +701,25 @@ def learning_curve(X_u, X, y, K_values=(2, 3, 4, 5), slab_scale=1.0,
 
 
 def plot_learning_curve(train_sizes, info_values, filestem):
+    """Plot learning curve and fit a saturation model.
+
+    Fits Lambda(n) = a*n / (b + n) and saves the figure to
+    ``{filestem}_learning_curve.pdf``.
+
+    Parameters
+    ----------
+    train_sizes : array-like
+        Training-set sizes.
+    info_values : array-like
+        Information-for-discrimination values (bits).
+    filestem : str
+        Output file prefix.
+
+    Returns
+    -------
+    str
+        Path to the saved PDF.
+    """
     def _saturation(n, a, b):
         return a * n / (b + n)
 
@@ -530,6 +818,22 @@ def summary_report(mcmc, filepath, unpenalized_names=None,
 
 
 def plot_pair_diagnostic(mcmc, filestem):
+    """Scatter plot of log(tau) vs log(eta) with divergences highlighted.
+
+    Saves the figure to ``{filestem}_logtau_logeta.pdf``.
+
+    Parameters
+    ----------
+    mcmc : MCMC
+        Fitted NUTS result.
+    filestem : str
+        Output file prefix.
+
+    Returns
+    -------
+    str
+        Path to the saved PDF.
+    """
     idata = az.from_numpyro(mcmc)
     ax = az.plot_pair(
         idata,
@@ -546,6 +850,22 @@ def plot_pair_diagnostic(mcmc, filestem):
 
 
 def plot_wevid(w, filestem):
+    """Plot weight-of-evidence density curves for controls and cases.
+
+    Saves the figure to ``{filestem}_wevid_dist.pdf``.
+
+    Parameters
+    ----------
+    w : dict
+        Output of :func:`wevid` or :func:`Wdensities`.
+    filestem : str
+        Output file prefix.
+
+    Returns
+    -------
+    str
+        Path to the saved PDF.
+    """
     plt.figure()
     plt.plot(w["xseq"], w["f_ctrls"], label="controls")
     plt.plot(w["xseq"], w["f_cases"], label="cases")
@@ -692,7 +1012,29 @@ def projpred_forward_search(result, X_u, X, V=5, prescreen_k=50):
 
 
 def plot_projpred(selected, kl_path, kl_null, filestem, var_names=None):
-    """Plot KL divergence path from projection predictive forward search."""
+    """Plot KL divergence path from projection predictive forward search.
+
+    Saves the figure to ``{filestem}_projpred.pdf``.
+
+    Parameters
+    ----------
+    selected : list of int
+        Indices of selected covariates (from :func:`projpred_forward_search`).
+    kl_path : list of float
+        KL divergence at each selection step.
+    kl_null : float
+        KL divergence for the null (unpenalized-only) submodel.
+    filestem : str
+        Output file prefix.
+    var_names : list of str, optional
+        Display names for penalized covariates.  When provided,
+        annotations use these names; otherwise falls back to ``X[j]``.
+
+    Returns
+    -------
+    str
+        Path to the saved PDF.
+    """
     steps = np.arange(len(kl_path) + 1)
     kl_values = [kl_null] + list(kl_path)
 
@@ -715,35 +1057,71 @@ def plot_projpred(selected, kl_path, kl_null, filestem, var_names=None):
 
 
 def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
-                 slab_scale=2.0, slab_df=4.0, scale_global=None,
+                 slab_scale=2.0, slab_df=4.0, p0=None, scale_global=None,
                  sampler="nuts", crossvalidate_=False,
                  num_warmup=1000, num_samples=1000, num_chains=4,
                  target_accept_prob=0.95, max_tree_depth=12,
                  rng_seed=0, projpred_V=None, max_workers=None):
-    """High-level entry point: takes a DataFrame and column names, runs full analysis.
+    """High-level entry point: fit horseshoe logistic regression from a DataFrame.
+
+    Extracts arrays, estimates ``scale_global`` if needed, fits the
+    model, and runs in-sample diagnostics.  Optionally runs
+    cross-validation and projection predictive variable selection.
 
     Parameters
     ----------
-    df : pandas DataFrame
+    df : DataFrame
+        Data containing outcome and covariates.
     y_col : str
         Name of the binary outcome column.
     unpenalized_cols : list of str
-        Columns for unpenalized covariates (an intercept is always added).
+        Columns for unpenalized covariates.  An intercept column of ones
+        is always prepended automatically.
     penalized_cols : list of str
         Columns for penalized (horseshoe) covariates.
     filestem : str
-        Prefix for all output files.
+        Prefix for all output files (CSV summaries and PDF plots).
+    slab_scale : float
+        Regularizing slab scale.
+    slab_df : float
+        Slab inverse-gamma degrees of freedom.
+    p0 : int or None
+        Prior guess for the number of penalized covariates with nonzero
+        effects.  Used to compute ``scale_global`` when it is not given
+        explicitly.  If None, defaults to ``max(1, J // 4)`` where J is
+        the number of penalized covariates.
     scale_global : float or None
-        If None, estimated as p0/(J-p0)/sqrt(N) with p0 = max(1, J//4).
+        Global shrinkage scale.  If None, estimated as
+        ``p0 / (J - p0) / sqrt(N)``.
+    sampler : {"nuts", "mclmc"}
+        Sampling algorithm.
     crossvalidate_ : bool
-        If True, run learning curve and 5-fold cross-validation.
+        If True, run a learning curve (K=2..5) and 5-fold
+        cross-validation.
+    num_warmup : int
+        Warmup iterations per chain.
+    num_samples : int
+        Posterior samples per chain.
+    num_chains : int
+        Number of MCMC chains.
+    target_accept_prob : float
+        NUTS target acceptance probability.
+    max_tree_depth : int
+        NUTS maximum tree depth.
+    rng_seed : int
+        Random seed.
     projpred_V : int or None
-        If not None, run projection predictive forward search selecting up to V variables.
+        If not None, run projection predictive forward search selecting
+        up to this many variables.
+    max_workers : int or None
+        Maximum parallel workers for cross-validation.
 
     Returns
     -------
-    dict with keys: result, X_u, X, y, beta_hat, m_eff,
-                    insample, cv (or None), projpred (or None).
+    dict
+        Keys: ``result``, ``X_u``, ``X``, ``y``, ``beta_hat``,
+        ``m_eff``, ``insample``, ``cv`` (or None), ``projpred``
+        (or None).
     """
     # --- 1. Extract arrays ---
     y = df[y_col].values.astype(np.float32)
@@ -762,7 +1140,8 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
 
     # --- 2. Default scale_global ---
     if scale_global is None:
-        p0 = max(1, J // 4)
+        if p0 is None:
+            p0 = max(1, J // 4)
         scale_global = p0 / (J - p0) / np.sqrt(N)
         print(f"scale_global estimated: p0={p0}, scale_global={scale_global:.4f}")
 

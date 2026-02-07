@@ -109,7 +109,7 @@ def main():
         unpenalized_cols=[],
         penalized_cols=penalized_names,
         filestem="hslogistic_ra",
-        slab_scale=2.0, slab_df=4.0,
+        slab_scale=2.0, slab_df=4.0, p0=3,
         num_warmup=500, num_samples=500, num_chains=2,
         rng_seed=0, projpred_V=5,
     )
