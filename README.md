@@ -217,9 +217,27 @@ cv_out = hs.run_analysis(
 )
 ```
 
-This runs a learning curve (K=2..5) and 5-fold cross-validation,
-producing plots for the learning curve and out-of-sample weight of
-evidence densities.
+This runs a learning curve (K=2..5) and 5-fold cross-validation.
+
+#### Learning curve
+
+The learning curve plots expected information for discrimination on
+held-out data against training set size, with a fitted saturation model:
+
+![Learning curve](img/learning_curve.png)
+
+#### Predictive performance (5-fold CV)
+
+```
+5-fold cross-validation (N=200):
+  C-statistic                            = 0.888
+  Expected information for discrimination = 2.65 bits
+  Logarithmic score                      = -81.234
+```
+
+The out-of-sample predictive performance is lower than the in-sample
+metrics, as expected.  The learning curve shows that performance has
+not yet saturated, indicating that more data would improve prediction.
 
 ## API
 
