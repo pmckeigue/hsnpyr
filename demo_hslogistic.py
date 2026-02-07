@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import jax.numpy as jnp
 
-import hslogistic as hs
+import hsnpyr as hs
 
 
 def main():

@@ -20,4 +20,4 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = ["hslogistic"]
+py-modules = ["hsnpyr"]

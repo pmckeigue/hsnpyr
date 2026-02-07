@@ -15,7 +15,7 @@ evaluation and variable selection.
 - **Projection predictive forward search** (Piironen & Vehtari, 2020) for
   variable selection, with pre-screening and warm-starting for scalability
 - Diagnostic plots: log(tau)--log(eta) pairs, weight of evidence densities,
-  learning curves, projpred KL path
+  forest plot, learning curves, projpred KL path
 
 ## Installation
 
@@ -36,14 +36,20 @@ pip install -e hsnpyr
 ## Quick start
 
 `run_analysis` is the top-level entry point.  It takes a pandas DataFrame
-and column names, fits the horseshoe model, and runs diagnostics:
+and column names.  A typical workflow has two steps:
+
+1. **Fit the full model** to obtain posterior summaries and variable
+   selection (projpred).
+2. **Cross-validate** to evaluate predictive performance on held-out data
+   and plot the learning curve.
 
 ```python
 import pandas as pd
-import hslogistic as hs
+import hsnpyr as hs
 
 df = pd.read_csv("mydata.csv")
 
+# Step 1: posterior summaries and projpred
 out = hs.run_analysis(
     df,
     y_col="outcome",
@@ -54,11 +60,27 @@ out = hs.run_analysis(
     num_warmup=1000, num_samples=1000, num_chains=4,
     projpred_V=10,                     # select up to 10 variables
 )
+
+# Step 2: cross-validation
+cv_out = hs.run_analysis(
+    df,
+    y_col="outcome",
+    unpenalized_cols=["age", "sex"],
+    penalized_cols=["gene1", "gene2", ..., "gene500"],
+    filestem="my_analysis",
+    p0=10,
+    num_warmup=1000, num_samples=1000, num_chains=4,
+    crossvalidate_=True,               # learning curve + 5-fold CV only
+)
 ```
 
-This writes a summary CSV and diagnostic plots to the working directory,
-and returns a dict with the fitted model, posterior summaries, and
+Step 1 writes a summary CSV, forest plot, diagnostic plots, and projpred
+plot, and returns a dict with the fitted model, posterior summaries, and
 variable selection results.
+
+Step 2 runs only the learning curve (K=2..5) and 5-fold cross-validation,
+skipping the full model fit.  It writes learning curve and CV weight of
+evidence plots, and returns the CV results.
 
 For direct control over the arrays, the lower-level functions are also
 available:
@@ -78,12 +100,14 @@ The following example uses `run_analysis` on a toy dataset: N=200
 observations, J=20 penalized covariates of which 3 have true nonzero
 effects (beta = +2.0, -1.5, +1.0), and an intercept of -0.5.
 
+### Step 1: Posterior summaries and projpred
+
 ```python
 import matplotlib
 matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
-import hslogistic as hs
+import hsnpyr as hs
 
 np.random.seed(42)
 N, J = 200, 20
@@ -102,17 +126,17 @@ out = hs.run_analysis(
     df, y_col="outcome",
     unpenalized_cols=[],
     penalized_cols=penalized_names,
-    filestem="hslogistic_ra",
+    filestem="demo",
     slab_scale=2.0, slab_df=4.0, p0=3,
     num_warmup=500, num_samples=500, num_chains=2,
     rng_seed=0, projpred_V=5,
 )
 ```
 
-### Posterior summary
+#### Posterior summary
 
-The summary CSV (`hslogistic_ra_summary.csv`) contains tau, eta, the
-intercept, the top 5 penalized covariates by squared effect size, and m_eff
+The summary CSV (`demo_summary.csv`) contains tau, eta, the intercept,
+the top 5 penalized covariates by squared effect size, and m_eff
 (effective number of nonzero coefficients):
 
 | parameter | mean | q0.03 | q0.97 | n_eff | r_hat |
@@ -131,7 +155,7 @@ The three true signals (x0, x1, x2) are recovered with the largest
 effect sizes.  The posterior mean of m_eff (2.59) is close to the true
 number of nonzero coefficients (3).
 
-### In-sample diagnostics
+#### In-sample diagnostics
 
 ```
 In-sample (N=200):
@@ -140,7 +164,7 @@ In-sample (N=200):
   Logarithmic score                      = -71.467
 ```
 
-### Forest plot
+#### Forest plot
 
 **Penalized betas** (posterior mean with 90% credible intervals):
 
@@ -149,7 +173,7 @@ In-sample (N=200):
 The three true signals (x0, x1, x2) are clearly separated from zero,
 while the noise covariates are shrunk towards zero by the horseshoe prior.
 
-### Diagnostic plots
+#### Diagnostic plots
 
 **log(tau) vs log(eta) pairs** -- no divergences:
 
@@ -159,7 +183,7 @@ while the noise covariates are shrunk towards zero by the horseshoe prior.
 
 ![Weight of evidence](img/wevid_dist.png)
 
-### Projection predictive variable selection
+#### Projection predictive variable selection
 
 The projpred forward search selects the three true signals first, then
 adds x14 and x9 (noise variables with small estimated effects):
@@ -178,6 +202,24 @@ Selected covariates (in order):
 The KL divergence drops steeply for the first three variables and
 flattens out, indicating that x0, x1, x2 capture nearly all the
 predictive information.
+
+### Step 2: Cross-validation
+
+```python
+cv_out = hs.run_analysis(
+    df, y_col="outcome",
+    unpenalized_cols=[],
+    penalized_cols=penalized_names,
+    filestem="demo",
+    slab_scale=2.0, slab_df=4.0, p0=3,
+    num_warmup=500, num_samples=500, num_chains=2,
+    rng_seed=0, crossvalidate_=True,
+)
+```
+
+This runs a learning curve (K=2..5) and 5-fold cross-validation,
+producing plots for the learning curve and out-of-sample weight of
+evidence densities.
 
 ## API
 
