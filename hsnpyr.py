@@ -251,85 +251,81 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
           f"({time.time() - t0:.1f}s)", flush=True)
 
     # --- 4. Sample (Python-level loop to avoid lax.scan compilation) ---
-    # Validate step_size: reduce until a test step gives finite logdensity
     L_tuned = sampler_params.L
     step_tuned = sampler_params.step_size
     inv_mass = sampler_params.inverse_mass_matrix
 
-    N_TEST_STEPS = 50  # number of test steps to validate step size
+    MAX_RETRIES = 5
 
-    def _build_and_test(step_size, L):
+    def _build_kernel(step_size, L):
         alg = blackjax.mclmc(
             logdensity_fn, L=L, step_size=step_size,
             inverse_mass_matrix=inv_mass,
         )
-        fn = jax.jit(alg.step)
-        # Run N_TEST_STEPS to detect intermittent NaN (a single test step
-        # can miss divergence that only appears for certain random keys)
-        test_state = state_after_tuning
-        for t in range(N_TEST_STEPS):
-            test_key = jax.random.fold_in(run_key, 900000 + t)
-            test_state, _ = fn(test_key, test_state)
-            ld = float(test_state.logdensity)
-            if not np.isfinite(ld):
-                return alg, fn, ld
-        return alg, fn, float(test_state.logdensity)
+        return alg, jax.jit(alg.step)
 
     print("MCLMC: JIT-compiling step function...", flush=True)
     t0 = time.time()
     step_size_cur = step_tuned
     L_cur = L_tuned
-    for attempt in range(20):
-        sampling_alg, step_fn, test_ld = _build_and_test(step_size_cur, L_cur)
-        if np.isfinite(test_ld):
-            break
-        step_size_cur = step_size_cur * 0.5
-        L_cur = L_cur * 0.5
-        print(f"MCLMC: step_size={float(step_size_cur):.4f} (halved, "
-              f"test logdensity was {test_ld} within {N_TEST_STEPS} trial steps)",
-              flush=True)
-    else:
-        raise RuntimeError(
-            "MCLMC: could not find a finite step size after 20 halvings")
-
-    if float(step_size_cur) != float(step_tuned):
-        print(f"MCLMC: reduced step_size {float(step_tuned):.4f} -> "
-              f"{float(step_size_cur):.4f}, "
-              f"L {float(L_tuned):.3f} -> {float(L_cur):.3f}", flush=True)
+    _, step_fn = _build_kernel(step_size_cur, L_cur)
+    # Force JIT compilation with a single test step
+    test_key = jax.random.fold_in(run_key, 999999)
+    test_state, _ = step_fn(test_key, state_after_tuning)
+    test_state.logdensity.block_until_ready()
     print(f"MCLMC: JIT compilation done ({time.time() - t0:.1f}s)", flush=True)
 
-    # Collect samples
-    t0 = time.time()
-    state_cur = state_after_tuning
-    sample_list = []
-    n_nan = 0
-    pbar = tqdm(range(num_samples), desc="MCLMC sampling", ncols=100)
-    for i in pbar:
-        step_key = jax.random.fold_in(run_key, i)
-        state_cur, info = step_fn(step_key, state_cur)
-        ld = float(state_cur.logdensity)
-        if not np.isfinite(ld):
-            n_nan += 1
-            if n_nan == 1:
-                print(f"\nMCLMC: WARNING — NaN logdensity at step {i}",
-                      flush=True)
-            if n_nan >= 10:
-                print("MCLMC: ERROR — 10 consecutive NaN steps, stopping",
-                      flush=True)
-                pbar.close()
+    # Sampling with automatic step-size retry on NaN divergence.
+    # When NaN logdensity is detected, halve step_size and L, rebuild
+    # the kernel, and restart sampling from the tuning state.
+    for retry in range(MAX_RETRIES + 1):
+        t0 = time.time()
+        state_cur = state_after_tuning
+        sample_list = []
+        n_nan = 0
+        nan_detected = False
+        desc = (f"MCLMC sampling (step={float(step_size_cur):.2f})"
+                if retry > 0 else "MCLMC sampling")
+        pbar = tqdm(range(num_samples), desc=desc, ncols=100)
+        for i in pbar:
+            step_key = jax.random.fold_in(run_key, i)
+            state_cur, info = step_fn(step_key, state_cur)
+            ld = float(state_cur.logdensity)
+            if not np.isfinite(ld):
+                n_nan += 1
+                if n_nan >= 10:
+                    pbar.close()
+                    nan_detected = True
+                    break
+            else:
+                n_nan = 0
+            sample_list.append(state_cur.position)
+            if (i + 1) % max(1, num_samples // 10) == 0:
+                pbar.set_postfix_str(f"logp={ld:.1f}")
+        else:
+            # Completed all samples without NaN
+            pbar.close()
+            break
+
+        if nan_detected:
+            if retry >= MAX_RETRIES:
                 raise RuntimeError(
                     f"MCLMC sampling failed: NaN logdensity at step {i} "
+                    f"after {MAX_RETRIES} step-size reductions "
                     f"(step_size={float(step_size_cur):.4f}). "
-                    f"Try reducing num_samples or using sampler='nuts'.")
-        else:
-            n_nan = 0  # reset consecutive counter
-        sample_list.append(state_cur.position)
-        if (i + 1) % max(1, num_samples // 10) == 0:
-            pbar.set_postfix_str(f"logp={ld:.1f}")
-    pbar.close()
+                    f"Try using sampler='nuts'.")
+            old_ss = float(step_size_cur)
+            step_size_cur = step_size_cur * 0.5
+            L_cur = L_cur * 0.5
+            print(f"MCLMC: NaN at step {i} with step_size={old_ss:.4f} — "
+                  f"halving to {float(step_size_cur):.4f} and restarting "
+                  f"(retry {retry + 1}/{MAX_RETRIES})", flush=True)
+            _, step_fn = _build_kernel(step_size_cur, L_cur)
+
     elapsed = time.time() - t0
     print(f"MCLMC: {num_samples} samples in {elapsed:.1f}s "
-          f"({num_samples / elapsed:.1f} samples/s)", flush=True)
+          f"({num_samples / elapsed:.1f} samples/s) "
+          f"[step_size={float(step_size_cur):.4f}]", flush=True)
 
     # Stack samples and transform to constrained space
     print("MCLMC: transforming to constrained space...", flush=True)
