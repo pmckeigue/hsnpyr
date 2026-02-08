@@ -742,18 +742,19 @@ def plot_learning_curve(train_sizes, info_values, filestem):
                         bounds=([0, 0], [np.inf, np.inf]))
     a_fit, b_fit = popt
 
-    plt.figure()
-    plt.plot(train_sizes, info_values, "ko", markersize=7, label="CV estimates")
+    fig, ax = plt.subplots(figsize=(5, 3.5))
+    ax.plot(train_sizes, info_values, "ko", markersize=6, label="CV estimates")
     n_curve = np.linspace(0, train_sizes[-1] * 1.2, 200)
-    plt.plot(n_curve, _saturation(n_curve, a_fit, b_fit), "b-",
-             label=rf"$\Lambda(n) = {a_fit:.2f}\,n\,/\,({b_fit:.0f} + n)$")
-    plt.xlabel("Training set size")
-    plt.ylabel("Expected information for discrimination (bits)")
-    plt.legend()
-    plt.xlim(left=0)
-    plt.ylim(bottom=0)
+    ax.plot(n_curve, _saturation(n_curve, a_fit, b_fit), "b-",
+            label=rf"$\Lambda(n) = {a_fit:.2f}\,n\,/\,({b_fit:.0f} + n)$")
+    ax.set_xlabel("Training set size")
+    ax.set_ylabel("Expected information for discrimination (bits)")
+    ax.legend(fontsize=8)
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+    fig.tight_layout()
     outpath = filestem + "_learning_curve.pdf"
-    plt.savefig(outpath)
+    fig.savefig(outpath)
     plt.show()
     plt.close()
 
@@ -863,6 +864,8 @@ def plot_pair_diagnostic(mcmc, filestem):
     )
     outpath = filestem + "_logtau_logeta.pdf"
     fig = ax.get_figure() if hasattr(ax, "get_figure") else ax.ravel()[0].get_figure()
+    fig.set_size_inches(5, 4)
+    fig.tight_layout()
     fig.savefig(outpath)
     plt.show()
     plt.close(fig)
@@ -886,15 +889,16 @@ def plot_wevid(w, filestem):
     str
         Path to the saved PDF.
     """
-    plt.figure()
-    plt.plot(w["xseq"], w["f_ctrls"], label="controls")
-    plt.plot(w["xseq"], w["f_cases"], label="cases")
-    plt.xlim(-10, 10)
-    plt.xlabel("Weight of evidence favouring case over control (nat log units)")
-    plt.ylabel("Density")
-    plt.legend()
+    fig, ax = plt.subplots(figsize=(5, 3.5))
+    ax.plot(w["xseq"], w["f_ctrls"], label="controls")
+    ax.plot(w["xseq"], w["f_cases"], label="cases")
+    ax.set_xlim(-10, 10)
+    ax.set_xlabel("Weight of evidence (log units)")
+    ax.set_ylabel("Density")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
     outpath = filestem + "_wevid_dist.pdf"
-    plt.savefig(outpath)
+    fig.savefig(outpath)
     plt.show()
     plt.close()
     return outpath
@@ -921,25 +925,27 @@ def plot_forest(beta_samples, penalized_names, filestem):
     beta_lo = np.array(jnp.percentile(beta_samples, 5, axis=0))
     beta_hi = np.array(jnp.percentile(beta_samples, 95, axis=0))
 
-    # Sort by absolute posterior mean (largest at top)
+    # Sort by absolute posterior mean, keep top 20
     order = np.argsort(np.abs(beta_mean))
+    n_show = min(20, len(order))
+    order = order[-n_show:]  # largest absolute values
     beta_mean = beta_mean[order]
     beta_lo = beta_lo[order]
     beta_hi = beta_hi[order]
     names = [penalized_names[i] for i in order]
 
-    J = len(names)
-    fig, ax = plt.subplots(figsize=(6, max(3, 0.3 * J)))
-    y_pos = np.arange(J)
+    fig, ax = plt.subplots(figsize=(5, max(2, 0.25 * n_show)))
+    y_pos = np.arange(n_show)
     ax.axvline(0, color="grey", linewidth=0.8, linestyle="--")
     ax.errorbar(beta_mean, y_pos,
                 xerr=[beta_mean - beta_lo, beta_hi - beta_mean],
                 fmt="o", color="steelblue", ecolor="steelblue",
-                elinewidth=1.5, capsize=3, markersize=4)
+                elinewidth=1.5, capsize=2, markersize=3)
     ax.set_yticks(y_pos)
-    ax.set_yticklabels(names)
-    ax.set_xlabel("Coefficient (standardized)")
-    ax.set_title("Penalized betas (posterior mean, 90% CI)")
+    ax.set_yticklabels(names, fontsize=8)
+    ax.set_ylim(-0.5, n_show - 0.5)
+    ax.set_xlabel("Log odds ratio")
+    ax.set_title("Top penalized betas (posterior mean, 90% CI)", fontsize=9)
     fig.tight_layout()
     outpath = filestem + "_forest.pdf"
     fig.savefig(outpath)
@@ -1108,8 +1114,8 @@ def plot_projpred(selected, kl_path, kl_null, filestem, var_names=None):
     steps = np.arange(len(kl_path) + 1)
     kl_values = [kl_null] + list(kl_path)
 
-    fig, ax = plt.subplots()
-    ax.plot(steps, kl_values, "ko-", markersize=7)
+    fig, ax = plt.subplots(figsize=(5, 3.5))
+    ax.plot(steps, kl_values, "ko-", markersize=5)
     # annotate each selected variable, alternating above/below to avoid overlap
     for i, j in enumerate(selected):
         label = var_names[j] if var_names is not None else f"X[{j}]"
