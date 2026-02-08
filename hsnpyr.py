@@ -251,33 +251,67 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
           f"({time.time() - t0:.1f}s)", flush=True)
 
     # --- 4. Sample (Python-level loop to avoid lax.scan compilation) ---
-    print(f"MCLMC: JIT-compiling step function...", flush=True)
-    sampling_alg = blackjax.mclmc(
-        logdensity_fn,
-        L=sampler_params.L,
-        step_size=sampler_params.step_size,
-        inverse_mass_matrix=sampler_params.inverse_mass_matrix,
-    )
-    step_fn = jax.jit(sampling_alg.step)
+    # Validate step_size: reduce until a test step gives finite logdensity
+    L_tuned = sampler_params.L
+    step_tuned = sampler_params.step_size
+    inv_mass = sampler_params.inverse_mass_matrix
 
-    # Warm up JIT with one step
+    def _build_and_test(step_size, L):
+        alg = blackjax.mclmc(
+            logdensity_fn, L=L, step_size=step_size,
+            inverse_mass_matrix=inv_mass,
+        )
+        fn = jax.jit(alg.step)
+        test_key = jax.random.fold_in(run_key, 999999)
+        test_state, _ = fn(test_key, state_after_tuning)
+        test_state.logdensity.block_until_ready()
+        return alg, fn, float(test_state.logdensity)
+
+    print("MCLMC: JIT-compiling step function...", flush=True)
     t0 = time.time()
-    warmup_key = jax.random.fold_in(run_key, 0)
-    state = step_fn(warmup_key, state_after_tuning)
-    state[0].logdensity.block_until_ready()  # force compilation
+    step_size_cur = step_tuned
+    L_cur = L_tuned
+    for attempt in range(20):
+        sampling_alg, step_fn, test_ld = _build_and_test(step_size_cur, L_cur)
+        if np.isfinite(test_ld):
+            break
+        step_size_cur = step_size_cur * 0.5
+        L_cur = L_cur * 0.5
+        print(f"MCLMC: step_size={float(step_size_cur):.4f} (halved, "
+              f"test logdensity was {test_ld})", flush=True)
+    else:
+        raise RuntimeError(
+            "MCLMC: could not find a finite step size after 20 halvings")
+
+    if float(step_size_cur) != float(step_tuned):
+        print(f"MCLMC: reduced step_size {float(step_tuned):.4f} -> "
+              f"{float(step_size_cur):.4f}, "
+              f"L {float(L_tuned):.3f} -> {float(L_cur):.3f}", flush=True)
     print(f"MCLMC: JIT compilation done ({time.time() - t0:.1f}s)", flush=True)
 
     # Collect samples
     t0 = time.time()
     state_cur = state_after_tuning
     sample_list = []
+    n_nan = 0
     pbar = tqdm(range(num_samples), desc="MCLMC sampling", ncols=100)
     for i in pbar:
         step_key = jax.random.fold_in(run_key, i)
         state_cur, info = step_fn(step_key, state_cur)
+        ld = float(state_cur.logdensity)
+        if not np.isfinite(ld):
+            n_nan += 1
+            if n_nan == 1:
+                print(f"\nMCLMC: WARNING — NaN logdensity at step {i}",
+                      flush=True)
+            if n_nan >= 10:
+                print("MCLMC: ERROR — 10 consecutive NaN steps, stopping",
+                      flush=True)
+                break
+        else:
+            n_nan = 0  # reset consecutive counter
         sample_list.append(state_cur.position)
         if (i + 1) % max(1, num_samples // 10) == 0:
-            ld = float(state_cur.logdensity)
             pbar.set_postfix_str(f"logp={ld:.1f}")
     pbar.close()
     elapsed = time.time() - t0
