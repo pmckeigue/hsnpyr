@@ -226,8 +226,11 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
           f"({time.time() - t0:.1f}s)", flush=True)
 
     # --- 3. Tune L and step_size ---
+    # Use at least 3 * num_params tuning steps for high-dimensional models
+    tune_steps = max(num_warmup, 3 * n_params)
     t0 = time.time()
-    print(f"MCLMC: tuning ({num_warmup} steps)...", flush=True)
+    print(f"MCLMC: tuning ({tune_steps} steps, "
+          f"diagonal preconditioning)...", flush=True)
     kernel = lambda inverse_mass_matrix: blackjax.mcmc.mclmc.build_kernel(
         logdensity_fn=logdensity_fn,
         integrator=blackjax.mcmc.integrators.isokinetic_mclachlan,
@@ -236,10 +239,10 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
 
     (state_after_tuning, sampler_params, _) = blackjax.mclmc_find_L_and_step_size(
         mclmc_kernel=kernel,
-        num_steps=num_warmup,
+        num_steps=tune_steps,
         state=initial_state,
         rng_key=tune_key,
-        diagonal_preconditioning=False,
+        diagonal_preconditioning=True,
     )
     L_val = float(sampler_params.L)
     step_val = float(sampler_params.step_size)
@@ -253,6 +256,7 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
         logdensity_fn,
         L=sampler_params.L,
         step_size=sampler_params.step_size,
+        inverse_mass_matrix=sampler_params.inverse_mass_matrix,
     )
     step_fn = jax.jit(sampling_alg.step)
 
