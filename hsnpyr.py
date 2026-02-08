@@ -34,6 +34,7 @@ __all__ = [
     "plot_learning_curve", "plot_pair_diagnostic",
     "plot_wevid", "plot_forest", "plot_pairs", "plot_trace",
     "plot_projpred",
+    "sample_matched_controls",
     "run_analysis",
 ]
 
@@ -1439,6 +1440,80 @@ def plot_projpred(selected, kl_path, kl_null, filestem, var_names=None):
     plt.close(fig)
     print(f"Plot saved to {outpath}")
     return outpath
+
+
+def sample_matched_controls(df, case_col, sex_col, age_col, R=1,
+                            rng_seed=0):
+    """Draw a stratum-matched case-control sample from a DataFrame.
+
+    All cases are retained.  Within each stratum defined by sex and
+    10-year age group, *R* controls are sampled per case (without
+    replacement).  If a stratum has fewer than *R* × n_cases controls,
+    all available controls in that stratum are included and a warning
+    is printed.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Source data.
+    case_col : str
+        Column defining case status (True/1 = case, False/0 = control).
+    sex_col : str
+        Column defining sex (categorical or integer).
+    age_col : str
+        Numeric column defining age.  Binned into 10-year groups
+        (0–9, 10–19, …).
+    R : int
+        Number of controls to sample per case within each stratum.
+    rng_seed : int
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    DataFrame
+        Subset of rows from *df* (original index preserved) containing
+        all cases and the sampled controls.
+    """
+    rng = np.random.RandomState(rng_seed)
+
+    cases = df[df[case_col].astype(bool)].copy()
+    controls = df[~df[case_col].astype(bool)].copy()
+
+    # 10-year age bins: 0-9, 10-19, …
+    age_bin_label = "___age_bin"
+    cases[age_bin_label] = (cases[age_col] // 10).astype(int)
+    controls[age_bin_label] = (controls[age_col] // 10).astype(int)
+
+    sampled_idx = []
+    n_short = 0
+    for (sex, abin), stratum_cases in cases.groupby([sex_col, age_bin_label]):
+        n_cases = len(stratum_cases)
+        n_needed = n_cases * R
+        pool = controls[(controls[sex_col] == sex)
+                        & (controls[age_bin_label] == abin)]
+        if len(pool) >= n_needed:
+            chosen = pool.sample(n=n_needed, random_state=rng)
+        else:
+            chosen = pool
+            if len(pool) < n_needed:
+                n_short += 1
+                print(f"  Stratum (sex={sex}, age={abin * 10}-{abin * 10 + 9}): "
+                      f"only {len(pool)} controls for {n_cases} cases "
+                      f"(needed {n_needed})")
+        sampled_idx.extend(chosen.index.tolist())
+
+    sampled_idx.extend(cases.index.tolist())
+    result = df.loc[sampled_idx]
+
+    n_cases_total = len(cases)
+    n_ctrl_total = len(sampled_idx) - n_cases_total
+    print(f"Matched sample: {n_cases_total} cases, "
+          f"{n_ctrl_total} controls "
+          f"(ratio {n_ctrl_total / max(1, n_cases_total):.1f}:1)")
+    if n_short > 0:
+        print(f"  {n_short} strata had fewer than {R} controls per case")
+
+    return result
 
 
 def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
