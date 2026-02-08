@@ -32,7 +32,7 @@ __all__ = [
     "learning_curve", "summary_report",
     "projpred_forward_search",
     "plot_learning_curve", "plot_pair_diagnostic",
-    "plot_wevid", "plot_forest", "plot_pairs", "plot_trace",
+    "plot_wevid", "plot_forest", "plot_pairs", "plot_trace", "plot_autocorr",
     "plot_projpred",
     "sample_matched_controls",
     "run_analysis",
@@ -293,6 +293,8 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
     print(f"MCLMC: JIT compilation done ({time.time() - t0:.1f}s)", flush=True)
 
     # --- Helper: sample one chain (no progress bar — used by threads) ---
+    import sys
+
     def _sample_chain(chain_idx, step_fn_, run_key_, state0, n_samples):
         """Return (sample_list, None) on success, (None, fail_step) on NaN."""
         chain_key = jax.random.fold_in(run_key_, chain_idx)
@@ -329,6 +331,7 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
             n_workers = min(num_chains, n_cpus)
             print(f"MCLMC: sampling {num_chains} chains "
                   f"({n_workers} threads)...", flush=True)
+            sys.stdout.flush()
             futures = {}
             with ThreadPoolExecutor(max_workers=n_workers) as pool:
                 for c in range(num_chains):
@@ -336,6 +339,7 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
                                     state_after_tuning, num_samples)
                     futures[f] = c
                 all_chain_samples = [None] * num_chains
+                n_done = 0
                 for f in as_completed(futures):
                     c = futures[f]
                     samples, fail_step = f.result()
@@ -343,11 +347,18 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
                         nan_detected = True
                         nan_chain = c + 1
                         nan_step = fail_step
+                        print(f"MCLMC: chain {c + 1} — NaN at step "
+                              f"{fail_step}", flush=True)
+                        sys.stdout.flush()
                         # Cancel remaining futures
                         for other_f in futures:
                             other_f.cancel()
                         break
                     all_chain_samples[c] = samples
+                    n_done += 1
+                    print(f"MCLMC: chain {c + 1}/{num_chains} done",
+                          flush=True)
+                    sys.stdout.flush()
         else:
             all_chain_samples = []
             for chain_idx in range(num_chains):
@@ -1202,10 +1213,11 @@ def plot_pairs(result, filestem):
     return outpath
 
 
-def plot_trace(result, filestem, unpenalized_names=None):
-    """Trace plot of tau, eta, m_eff and top unpenalized coefficients.
+def plot_trace(result, filestem, penalized_names=None):
+    """Trace plot of tau, eta, m_eff and top 3 penalized coefficients.
 
-    Saves the figure to ``{filestem}_trace.pdf``.
+    Each chain is plotted in a distinct colour.  Saves the figure to
+    ``{filestem}_trace.pdf``.
 
     Parameters
     ----------
@@ -1213,9 +1225,8 @@ def plot_trace(result, filestem, unpenalized_names=None):
         Fitted model.
     filestem : str
         Output file prefix.
-    unpenalized_names : list of str, optional
-        Display names for the unpenalized coefficients (length U,
-        typically ``["Intercept", ...]``).
+    penalized_names : list of str, optional
+        Display names for the penalized covariates (length J).
 
     Returns
     -------
@@ -1231,17 +1242,17 @@ def plot_trace(result, filestem, unpenalized_names=None):
         "m_eff": np.array(m_eff_ch),
     }
 
-    # Add top 3 unpenalized coefficients (by absolute posterior mean)
-    beta_u_ch = chain_samples.get("beta_u")
-    if beta_u_ch is not None:
-        U = beta_u_ch.shape[-1]
-        names = (unpenalized_names if unpenalized_names is not None
-                 else [f"beta_u[{i}]" for i in range(U)])
-        abs_means = np.abs(np.array(beta_u_ch).reshape(-1, U).mean(axis=0))
-        n_show = min(3, U)
+    # Add top 3 penalized coefficients (by absolute posterior mean)
+    beta_ch = chain_samples.get("beta")
+    if beta_ch is not None:
+        J = beta_ch.shape[-1]
+        names = (penalized_names if penalized_names is not None
+                 else [f"beta[{j}]" for j in range(J)])
+        abs_means = np.abs(np.array(beta_ch).reshape(-1, J).mean(axis=0))
+        n_show = min(3, J)
         top_idx = np.argsort(abs_means)[-n_show:][::-1]
         for idx in top_idx:
-            data[names[idx]] = np.array(beta_u_ch[..., idx])
+            data[names[idx]] = np.array(beta_ch[..., idx])
 
     idata = az.from_dict(posterior=data)
     n_vars = len(data)
@@ -1249,6 +1260,58 @@ def plot_trace(result, filestem, unpenalized_names=None):
     fig = axes.ravel()[0].get_figure()
     fig.tight_layout()
     outpath = filestem + "_trace.pdf"
+    fig.savefig(outpath)
+    plt.show()
+    plt.close(fig)
+    print(f"Plot saved to {outpath}")
+    return outpath
+
+
+def plot_autocorr(result, filestem, penalized_names=None):
+    """Autocorrelation plot for tau, eta, m_eff and top 3 penalized betas.
+
+    Saves the figure to ``{filestem}_autocorr.pdf``.
+
+    Parameters
+    ----------
+    result : MCMC or _SamplesResult
+        Fitted model.
+    filestem : str
+        Output file prefix.
+    penalized_names : list of str, optional
+        Display names for the penalized covariates (length J).
+
+    Returns
+    -------
+    str
+        Path to the saved PDF.
+    """
+    chain_samples = result.get_samples(group_by_chain=True)
+    m_eff_ch = _m_eff_from_chain_samples(chain_samples)
+
+    data = {
+        "tau": np.array(chain_samples["tau"]),
+        "eta": np.array(chain_samples["eta"]),
+        "m_eff": np.array(m_eff_ch),
+    }
+
+    beta_ch = chain_samples.get("beta")
+    if beta_ch is not None:
+        J = beta_ch.shape[-1]
+        names = (penalized_names if penalized_names is not None
+                 else [f"beta[{j}]" for j in range(J)])
+        abs_means = np.abs(np.array(beta_ch).reshape(-1, J).mean(axis=0))
+        n_show = min(3, J)
+        top_idx = np.argsort(abs_means)[-n_show:][::-1]
+        for idx in top_idx:
+            data[names[idx]] = np.array(beta_ch[..., idx])
+
+    idata = az.from_dict(posterior=data)
+    n_vars = len(data)
+    axes = az.plot_autocorr(idata, figsize=(10, 1.5 * n_vars))
+    fig = axes.ravel()[0].get_figure()
+    fig.tight_layout()
+    outpath = filestem + "_autocorr.pdf"
     fig.savefig(outpath)
     plt.show()
     plt.close(fig)
@@ -1759,7 +1822,8 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         plot_pair_diagnostic(result, filestem)
     else:
         plot_pairs(result, filestem)
-        plot_trace(result, filestem, unpenalized_names=unpenalized_names)
+        plot_trace(result, filestem, penalized_names=list(penalized_cols))
+        plot_autocorr(result, filestem, penalized_names=list(penalized_cols))
     plot_wevid(w, filestem)
 
     # --- 5. Projpred ---
