@@ -90,11 +90,24 @@ def hslogistic(X_u=None, X=None, y=None, slab_scale=None, slab_df=None, scale_gl
 
 
 class _SamplesResult:
-    """Wrapper so that MCLMC results have the same interface as MCMC."""
-    def __init__(self, samples):
-        self._samples = samples
-    def get_samples(self):
-        return self._samples
+    """Wrapper so that MCLMC results have the same interface as MCMC.
+
+    Samples are stored with shape ``(num_chains, num_samples, ...)``
+    per site so that ``get_samples(group_by_chain=True)`` works for
+    computing r_hat and n_eff.
+    """
+    def __init__(self, samples, num_chains=1):
+        self._samples = samples      # (num_chains, num_samples, ...) per site
+        self._num_chains = num_chains
+
+    def get_samples(self, group_by_chain=False):
+        if group_by_chain:
+            return self._samples
+        # Flatten chain dimension: (num_chains * num_samples, ...)
+        return jax.tree.map(
+            lambda x: x.reshape(-1, *x.shape[2:]),
+            self._samples,
+        )
 
 
 def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
@@ -166,17 +179,19 @@ def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
             mcmc.print_summary()
         return mcmc
     elif sampler == "mclmc":
-        return _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed)
+        return _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains,
+                          rng_seed)
     else:
         raise ValueError(f"Unknown sampler: {sampler!r}. Use 'nuts' or 'mclmc'.")
 
 
-def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
+def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
     """Fit using the MCLMC sampler via BlackJAX.
 
-    Uses a Python-level sampling loop (instead of ``jax.lax.scan``)
-    to avoid excessive XLA compilation time with high-dimensional
-    models.
+    Tunes L and step_size once, then runs ``num_chains`` independent
+    sampling chains sequentially.  Uses a Python-level sampling loop
+    (instead of ``jax.lax.scan``) to avoid excessive XLA compilation
+    time with high-dimensional models.
 
     Parameters
     ----------
@@ -185,14 +200,16 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
     num_warmup : int
         Tuning steps for step-size and trajectory-length selection.
     num_samples : int
-        Number of posterior samples to draw.
+        Number of posterior samples to draw per chain.
+    num_chains : int
+        Number of independent chains.
     rng_seed : int
         Random seed.
 
     Returns
     -------
     _SamplesResult
-        Wrapper around the constrained posterior samples.
+        Wrapper with samples shaped ``(num_chains, num_samples, ...)``.
     """
     import time
     from tqdm.auto import tqdm
@@ -225,8 +242,7 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
     print(f"MCLMC: initial logdensity = {float(initial_state.logdensity):.2f} "
           f"({time.time() - t0:.1f}s)", flush=True)
 
-    # --- 3. Tune L and step_size ---
-    # Use at least 3 * num_params tuning steps for high-dimensional models
+    # --- 3. Tune L and step_size (single tuning, shared across chains) ---
     tune_steps = max(num_warmup, 3 * n_params)
     t0 = time.time()
     print(f"MCLMC: tuning ({tune_steps} steps, "
@@ -250,11 +266,10 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
           f"logdensity={float(state_after_tuning.logdensity):.2f} "
           f"({time.time() - t0:.1f}s)", flush=True)
 
-    # --- 4. Sample (Python-level loop to avoid lax.scan compilation) ---
+    # --- 4. Sample num_chains chains (Python-level loop) ---
     L_tuned = sampler_params.L
     step_tuned = sampler_params.step_size
     inv_mass = sampler_params.inverse_mass_matrix
-
     MAX_RETRIES = 5
 
     def _build_kernel(step_size, L):
@@ -262,80 +277,98 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
             logdensity_fn, L=L, step_size=step_size,
             inverse_mass_matrix=inv_mass,
         )
-        return alg, jax.jit(alg.step)
+        return jax.jit(alg.step)
 
     print("MCLMC: JIT-compiling step function...", flush=True)
     t0 = time.time()
     step_size_cur = step_tuned
     L_cur = L_tuned
-    _, step_fn = _build_kernel(step_size_cur, L_cur)
+    step_fn = _build_kernel(step_size_cur, L_cur)
     # Force JIT compilation with a single test step
     test_key = jax.random.fold_in(run_key, 999999)
     test_state, _ = step_fn(test_key, state_after_tuning)
     test_state.logdensity.block_until_ready()
     print(f"MCLMC: JIT compilation done ({time.time() - t0:.1f}s)", flush=True)
 
-    # Sampling with automatic step-size retry on NaN divergence.
-    # When NaN logdensity is detected, halve step_size and L, rebuild
-    # the kernel, and restart sampling from the tuning state.
+    # Run all chains with automatic step-size retry on NaN divergence.
+    # If any chain hits NaN, halve step_size and restart all chains.
     for retry in range(MAX_RETRIES + 1):
         t0 = time.time()
-        state_cur = state_after_tuning
-        sample_list = []
-        n_nan = 0
+        all_chain_samples = []
         nan_detected = False
-        desc = (f"MCLMC sampling (step={float(step_size_cur):.2f})"
-                if retry > 0 else "MCLMC sampling")
-        pbar = tqdm(range(num_samples), desc=desc, ncols=100)
-        for i in pbar:
-            step_key = jax.random.fold_in(run_key, i)
-            state_cur, info = step_fn(step_key, state_cur)
-            ld = float(state_cur.logdensity)
-            if not np.isfinite(ld):
-                n_nan += 1
-                if n_nan >= 10:
-                    pbar.close()
-                    nan_detected = True
-                    break
+        nan_chain = nan_step = None
+
+        for chain_idx in range(num_chains):
+            chain_key = jax.random.fold_in(run_key, chain_idx)
+            state_cur = state_after_tuning
+            sample_list = []
+            n_nan = 0
+
+            desc = f"MCLMC chain {chain_idx + 1}/{num_chains}"
+            if retry > 0:
+                desc += f" (step={float(step_size_cur):.2f})"
+            pbar = tqdm(range(num_samples), desc=desc, ncols=100)
+            for i in pbar:
+                step_key = jax.random.fold_in(chain_key, i)
+                state_cur, info = step_fn(step_key, state_cur)
+                ld = float(state_cur.logdensity)
+                if not np.isfinite(ld):
+                    n_nan += 1
+                    if n_nan >= 10:
+                        pbar.close()
+                        nan_detected = True
+                        nan_chain = chain_idx + 1
+                        nan_step = i
+                        break
+                else:
+                    n_nan = 0
+                sample_list.append(state_cur.position)
+                if (i + 1) % max(1, num_samples // 10) == 0:
+                    pbar.set_postfix_str(f"logp={ld:.1f}")
             else:
-                n_nan = 0
-            sample_list.append(state_cur.position)
-            if (i + 1) % max(1, num_samples // 10) == 0:
-                pbar.set_postfix_str(f"logp={ld:.1f}")
-        else:
-            # Completed all samples without NaN
-            pbar.close()
+                pbar.close()
+
+            if nan_detected:
+                break
+            all_chain_samples.append(sample_list)
+
+        if not nan_detected:
             break
 
-        if nan_detected:
-            if retry >= MAX_RETRIES:
-                raise RuntimeError(
-                    f"MCLMC sampling failed: NaN logdensity at step {i} "
-                    f"after {MAX_RETRIES} step-size reductions "
-                    f"(step_size={float(step_size_cur):.4f}). "
-                    f"Try using sampler='nuts'.")
-            old_ss = float(step_size_cur)
-            step_size_cur = step_size_cur * 0.5
-            L_cur = L_cur * 0.5
-            print(f"MCLMC: NaN at step {i} with step_size={old_ss:.4f} — "
-                  f"halving to {float(step_size_cur):.4f} and restarting "
-                  f"(retry {retry + 1}/{MAX_RETRIES})", flush=True)
-            _, step_fn = _build_kernel(step_size_cur, L_cur)
+        if retry >= MAX_RETRIES:
+            raise RuntimeError(
+                f"MCLMC sampling failed: NaN logdensity at step {nan_step} "
+                f"(chain {nan_chain}) after {MAX_RETRIES} step-size "
+                f"reductions (step_size={float(step_size_cur):.4f}). "
+                f"Try using sampler='nuts'.")
+        old_ss = float(step_size_cur)
+        step_size_cur = step_size_cur * 0.5
+        L_cur = L_cur * 0.5
+        print(f"MCLMC: NaN at step {nan_step} (chain {nan_chain}) "
+              f"with step_size={old_ss:.4f} — halving to "
+              f"{float(step_size_cur):.4f} and restarting "
+              f"(retry {retry + 1}/{MAX_RETRIES})", flush=True)
+        step_fn = _build_kernel(step_size_cur, L_cur)
 
     elapsed = time.time() - t0
-    print(f"MCLMC: {num_samples} samples in {elapsed:.1f}s "
-          f"({num_samples / elapsed:.1f} samples/s) "
+    print(f"MCLMC: {num_chains} x {num_samples} samples in {elapsed:.1f}s "
           f"[step_size={float(step_size_cur):.4f}]", flush=True)
 
-    # Stack samples and transform to constrained space
+    # Transform each chain to constrained space, then stack
     print("MCLMC: transforming to constrained space...", flush=True)
     t0 = time.time()
-    samples_unconstrained = jax.tree.map(
-        lambda *arrs: jnp.stack(arrs), *sample_list)
-    constrained = jax.vmap(postprocess_fn)(samples_unconstrained)
+    chain_constrained = []
+    for chain_samples in all_chain_samples:
+        unconstrained = jax.tree.map(
+            lambda *arrs: jnp.stack(arrs), *chain_samples)
+        constrained = jax.vmap(postprocess_fn)(unconstrained)
+        chain_constrained.append(constrained)
+    # Stack to (num_chains, num_samples, ...) per site
+    all_constrained = jax.tree.map(
+        lambda *arrs: jnp.stack(arrs), *chain_constrained)
     print(f"MCLMC: done ({time.time() - t0:.1f}s)", flush=True)
 
-    return _SamplesResult(constrained)
+    return _SamplesResult(all_constrained, num_chains=num_chains)
 
 
 def predict(result, X_u_new, X_new, slab_scale=1.0, slab_df=4.0,
@@ -862,8 +895,8 @@ def summary_report(mcmc, filepath, unpenalized_names=None,
 
     Parameters
     ----------
-    mcmc : MCMC
-        Fitted NUTS result (must support ``group_by_chain``).
+    mcmc : MCMC or _SamplesResult
+        Fitted result (NUTS or MCLMC) supporting ``get_samples(group_by_chain=True)``.
     filepath : str
         Path for the output CSV.
     unpenalized_names : list of str, optional
@@ -1435,10 +1468,9 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
     is_nuts = sampler == "nuts"
 
     unpenalized_names = ["Intercept"] + list(unpenalized_cols)
-    if is_nuts:
-        summary_report(result, filestem + "_summary.csv",
-                       unpenalized_names=unpenalized_names,
-                       penalized_names=list(penalized_cols))
+    summary_report(result, filestem + "_summary.csv",
+                   unpenalized_names=unpenalized_names,
+                   penalized_names=list(penalized_cols))
 
     # posterior mean betas and forest plot
     samples = result.get_samples()
