@@ -290,47 +290,95 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
     test_state.logdensity.block_until_ready()
     print(f"MCLMC: JIT compilation done ({time.time() - t0:.1f}s)", flush=True)
 
+    # --- Helper: sample one chain (no progress bar — used by threads) ---
+    def _sample_chain(chain_idx, step_fn_, run_key_, state0, n_samples):
+        """Return (sample_list, None) on success, (None, fail_step) on NaN."""
+        chain_key = jax.random.fold_in(run_key_, chain_idx)
+        state_cur = state0
+        sample_list = []
+        n_nan = 0
+        for i in range(n_samples):
+            step_key = jax.random.fold_in(chain_key, i)
+            state_cur, _ = step_fn_(step_key, state_cur)
+            ld = float(state_cur.logdensity)
+            if not np.isfinite(ld):
+                n_nan += 1
+                if n_nan >= 10:
+                    return None, i
+            else:
+                n_nan = 0
+            sample_list.append(state_cur.position)
+        return sample_list, None
+
+    # Decide whether to run chains in parallel (threads).
+    # JAX releases the GIL during XLA execution, so threading works.
+    n_cpus = os.cpu_count() or 1
+    parallel = num_chains > 1 and n_cpus >= 2
+
     # Run all chains with automatic step-size retry on NaN divergence.
     # If any chain hits NaN, halve step_size and restart all chains.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     for retry in range(MAX_RETRIES + 1):
         t0 = time.time()
-        all_chain_samples = []
         nan_detected = False
         nan_chain = nan_step = None
 
-        for chain_idx in range(num_chains):
-            chain_key = jax.random.fold_in(run_key, chain_idx)
-            state_cur = state_after_tuning
-            sample_list = []
-            n_nan = 0
-
-            desc = f"MCLMC chain {chain_idx + 1}/{num_chains}"
-            if retry > 0:
-                desc += f" (step={float(step_size_cur):.2f})"
-            pbar = tqdm(range(num_samples), desc=desc, ncols=100)
-            for i in pbar:
-                step_key = jax.random.fold_in(chain_key, i)
-                state_cur, info = step_fn(step_key, state_cur)
-                ld = float(state_cur.logdensity)
-                if not np.isfinite(ld):
-                    n_nan += 1
-                    if n_nan >= 10:
-                        pbar.close()
+        if parallel:
+            n_workers = min(num_chains, n_cpus)
+            print(f"MCLMC: sampling {num_chains} chains "
+                  f"({n_workers} threads)...", flush=True)
+            futures = {}
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                for c in range(num_chains):
+                    f = pool.submit(_sample_chain, c, step_fn, run_key,
+                                    state_after_tuning, num_samples)
+                    futures[f] = c
+                all_chain_samples = [None] * num_chains
+                for f in as_completed(futures):
+                    c = futures[f]
+                    samples, fail_step = f.result()
+                    if fail_step is not None:
                         nan_detected = True
-                        nan_chain = chain_idx + 1
-                        nan_step = i
+                        nan_chain = c + 1
+                        nan_step = fail_step
+                        # Cancel remaining futures
+                        for other_f in futures:
+                            other_f.cancel()
                         break
+                    all_chain_samples[c] = samples
+        else:
+            all_chain_samples = []
+            for chain_idx in range(num_chains):
+                desc = f"MCLMC chain {chain_idx + 1}/{num_chains}"
+                if retry > 0:
+                    desc += f" (step={float(step_size_cur):.2f})"
+                pbar = tqdm(range(num_samples), desc=desc, ncols=100)
+                chain_key = jax.random.fold_in(run_key, chain_idx)
+                state_cur = state_after_tuning
+                sample_list = []
+                n_nan = 0
+                for i in pbar:
+                    step_key = jax.random.fold_in(chain_key, i)
+                    state_cur, _ = step_fn(step_key, state_cur)
+                    ld = float(state_cur.logdensity)
+                    if not np.isfinite(ld):
+                        n_nan += 1
+                        if n_nan >= 10:
+                            pbar.close()
+                            nan_detected = True
+                            nan_chain = chain_idx + 1
+                            nan_step = i
+                            break
+                    else:
+                        n_nan = 0
+                    sample_list.append(state_cur.position)
+                    if (i + 1) % max(1, num_samples // 10) == 0:
+                        pbar.set_postfix_str(f"logp={ld:.1f}")
                 else:
-                    n_nan = 0
-                sample_list.append(state_cur.position)
-                if (i + 1) % max(1, num_samples // 10) == 0:
-                    pbar.set_postfix_str(f"logp={ld:.1f}")
-            else:
-                pbar.close()
-
-            if nan_detected:
-                break
-            all_chain_samples.append(sample_list)
+                    pbar.close()
+                if nan_detected:
+                    break
+                all_chain_samples.append(sample_list)
 
         if not nan_detected:
             break
@@ -914,7 +962,7 @@ def summary_report(mcmc, filepath, unpenalized_names=None,
         x_flat = x_chain.reshape(-1)
         d = {
             "parameter": name,
-            "kappa": kappa_val,
+            "kappa": kappa_val if kappa_val is not None else "",
             "mean": float(jnp.mean(x_flat)),
             "q0.03": float(jnp.percentile(x_flat, 3)),
             "q0.97": float(jnp.percentile(x_flat, 97)),
@@ -1388,13 +1436,17 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
 
     N, J = X.shape
 
-    # Standardize penalized covariates
+    # Standardize penalized covariates; centre unpenalized covariates
     if standardize:
         X_mean = X.mean(axis=0)
         X_std = X.std(axis=0)
         X_std[X_std == 0] = 1.0  # avoid division by zero for constant cols
         X = (X - X_mean) / X_std
+        if X_u_raw.shape[1] > 0:
+            X_u_raw = X_u_raw - X_u_raw.mean(axis=0)
         print("Penalized covariates standardized to zero mean, unit variance")
+        if unpenalized_cols:
+            print("Unpenalized covariates centred to zero mean")
 
     intercept_col = np.ones((N, 1), dtype=np.float32)
     if unpenalized_cols:
