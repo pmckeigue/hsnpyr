@@ -7,7 +7,7 @@ evaluation and variable selection.
 
 - **Regularized horseshoe prior** (Piironen & Vehtari, 2017) with separate
   unpenalized and penalized covariate groups
-- **Samplers**: NUTS (via NumPyro) and MCLMC (via BlackJAX)
+- **Samplers**: No-U-turn sampler (NUTS) via NumPyro and microcanonical Langevin-like Monte Carlo (MCLMC) via BlackJAX
 - **Evaluation**: C-statistic, logarithmic score, weight of evidence
   densities, and expected information for discrimination (McKeigue, 2019)
 - **K-fold cross-validation** with automatic memory-aware parallelism
@@ -153,7 +153,7 @@ shrinkage factors (kappa):
 | x9 | 0.9239 | -0.1332 | -0.5503 | 0.0923 | 615 | 0.999 |
 
 The three true signals (x0, x1, x2) are recovered with the largest
-effect sizes.  The posterior mean of m_eff (2.59) is close to the true
+effect sizes.  The posterior mean of m_eff is close to the true
 number of nonzero coefficients (3).
 
 #### In-sample diagnostics

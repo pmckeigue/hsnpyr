@@ -256,15 +256,23 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
     step_tuned = sampler_params.step_size
     inv_mass = sampler_params.inverse_mass_matrix
 
+    N_TEST_STEPS = 50  # number of test steps to validate step size
+
     def _build_and_test(step_size, L):
         alg = blackjax.mclmc(
             logdensity_fn, L=L, step_size=step_size,
             inverse_mass_matrix=inv_mass,
         )
         fn = jax.jit(alg.step)
-        test_key = jax.random.fold_in(run_key, 999999)
-        test_state, _ = fn(test_key, state_after_tuning)
-        test_state.logdensity.block_until_ready()
+        # Run N_TEST_STEPS to detect intermittent NaN (a single test step
+        # can miss divergence that only appears for certain random keys)
+        test_state = state_after_tuning
+        for t in range(N_TEST_STEPS):
+            test_key = jax.random.fold_in(run_key, 900000 + t)
+            test_state, _ = fn(test_key, test_state)
+            ld = float(test_state.logdensity)
+            if not np.isfinite(ld):
+                return alg, fn, ld
         return alg, fn, float(test_state.logdensity)
 
     print("MCLMC: JIT-compiling step function...", flush=True)
@@ -278,7 +286,8 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
         step_size_cur = step_size_cur * 0.5
         L_cur = L_cur * 0.5
         print(f"MCLMC: step_size={float(step_size_cur):.4f} (halved, "
-              f"test logdensity was {test_ld})", flush=True)
+              f"test logdensity was {test_ld} within {N_TEST_STEPS} trial steps)",
+              flush=True)
     else:
         raise RuntimeError(
             "MCLMC: could not find a finite step size after 20 halvings")
@@ -307,7 +316,11 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
             if n_nan >= 10:
                 print("MCLMC: ERROR — 10 consecutive NaN steps, stopping",
                       flush=True)
-                break
+                pbar.close()
+                raise RuntimeError(
+                    f"MCLMC sampling failed: NaN logdensity at step {i} "
+                    f"(step_size={float(step_size_cur):.4f}). "
+                    f"Try reducing num_samples or using sampler='nuts'.")
         else:
             n_nan = 0  # reset consecutive counter
         sample_list.append(state_cur.position)
@@ -1404,13 +1417,23 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         }
 
     # --- 3. Fit full model ---
-    result = fit(
-        jnp.array(X_u), jnp.array(X), jnp.array(y),
-        slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
-        num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains,
-        target_accept_prob=target_accept_prob, max_tree_depth=max_tree_depth,
-        rng_seed=rng_seed, sampler=sampler, print_summary=False,
-    )
+    try:
+        result = fit(
+            jnp.array(X_u), jnp.array(X), jnp.array(y),
+            slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
+            num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains,
+            target_accept_prob=target_accept_prob, max_tree_depth=max_tree_depth,
+            rng_seed=rng_seed, sampler=sampler, print_summary=False,
+        )
+    except RuntimeError as e:
+        print(f"\nrun_analysis: sampling failed — {e}")
+        print("Exiting without producing plots or summaries.")
+        return {
+            "error": str(e),
+            "N": N, "n_controls": n_controls, "n_cases": n_cases,
+            "unpenalized_cols": ["Intercept"] + list(unpenalized_cols),
+            "penalized_cols": list(penalized_cols),
+        }
 
     # --- 4. In-sample diagnostics ---
     is_nuts = sampler == "nuts"
