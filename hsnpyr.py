@@ -255,18 +255,42 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
         inverse_mass_matrix=inverse_mass_matrix,
     )
 
-    (state_after_tuning, sampler_params, _) = blackjax.mclmc_find_L_and_step_size(
-        mclmc_kernel=kernel,
-        num_steps=tune_steps,
-        state=initial_state,
-        rng_key=tune_key,
-        diagonal_preconditioning=True,
-    )
-    L_val = float(sampler_params.L)
-    step_val = float(sampler_params.step_size)
-    print(f"MCLMC: tuning done — L={L_val:.3f}, step_size={step_val:.4f}, "
-          f"logdensity={float(state_after_tuning.logdensity):.2f} "
-          f"({time.time() - t0:.1f}s)", flush=True)
+    MAX_TUNE_RETRIES = 3
+    for tune_attempt in range(MAX_TUNE_RETRIES):
+        cur_tune_key = (tune_key if tune_attempt == 0
+                        else jax.random.fold_in(tune_key, tune_attempt))
+        (state_after_tuning, sampler_params, _) = (
+            blackjax.mclmc_find_L_and_step_size(
+                mclmc_kernel=kernel,
+                num_steps=tune_steps,
+                state=initial_state,
+                rng_key=cur_tune_key,
+                diagonal_preconditioning=True,
+            ))
+        L_val = float(sampler_params.L)
+        step_val = float(sampler_params.step_size)
+        ld_val = float(state_after_tuning.logdensity)
+        print(f"MCLMC: tuning done — L={L_val:.3f}, step_size={step_val:.4f}, "
+              f"logdensity={ld_val:.2f} "
+              f"({time.time() - t0:.1f}s)", flush=True)
+
+        # Check for degenerate tuning results
+        if step_val > 0 and np.isfinite(step_val) and np.isfinite(ld_val):
+            break
+        problem = ("step_size=0" if step_val == 0
+                   else f"step_size={step_val}" if not np.isfinite(step_val)
+                   else f"logdensity={ld_val}")
+        if tune_attempt < MAX_TUNE_RETRIES - 1:
+            print(f"MCLMC: WARNING — degenerate tuning ({problem}), "
+                  f"retrying with different random key "
+                  f"(attempt {tune_attempt + 2}/{MAX_TUNE_RETRIES})",
+                  flush=True)
+            t0 = time.time()
+        else:
+            raise RuntimeError(
+                f"MCLMC tuning failed after {MAX_TUNE_RETRIES} attempts "
+                f"({problem}). Try increasing num_warmup or using "
+                f"sampler='nuts'.")
 
     # --- 4. Sample num_chains chains (Python-level loop) ---
     L_tuned = sampler_params.L
@@ -1270,7 +1294,7 @@ def plot_trace(result, filestem, penalized_names=None):
 def plot_autocorr(result, filestem, penalized_names=None):
     """Autocorrelation plot for tau, eta, m_eff and top 3 penalized betas.
 
-    Saves the figure to ``{filestem}_autocorr.pdf``.
+    Uses chain 0 only.  Saves the figure to ``{filestem}_autocorr.pdf``.
 
     Parameters
     ----------
@@ -1289,10 +1313,11 @@ def plot_autocorr(result, filestem, penalized_names=None):
     chain_samples = result.get_samples(group_by_chain=True)
     m_eff_ch = _m_eff_from_chain_samples(chain_samples)
 
+    # Use only chain 0: keep shape (1, num_samples, ...) for arviz
     data = {
-        "tau": np.array(chain_samples["tau"]),
-        "eta": np.array(chain_samples["eta"]),
-        "m_eff": np.array(m_eff_ch),
+        "tau": np.array(chain_samples["tau"][:1]),
+        "eta": np.array(chain_samples["eta"][:1]),
+        "m_eff": np.array(m_eff_ch[:1]),
     }
 
     beta_ch = chain_samples.get("beta")
@@ -1304,7 +1329,7 @@ def plot_autocorr(result, filestem, penalized_names=None):
         n_show = min(3, J)
         top_idx = np.argsort(abs_means)[-n_show:][::-1]
         for idx in top_idx:
-            data[names[idx]] = np.array(beta_ch[..., idx])
+            data[names[idx]] = np.array(beta_ch[:1, :, idx])
 
     idata = az.from_dict(posterior=data)
     n_vars = len(data)
