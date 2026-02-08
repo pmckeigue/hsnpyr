@@ -174,6 +174,10 @@ def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
 def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
     """Fit using the MCLMC sampler via BlackJAX.
 
+    Uses a Python-level sampling loop (instead of ``jax.lax.scan``)
+    to avoid excessive XLA compilation time with high-dimensional
+    models.
+
     Parameters
     ----------
     model_kwargs : dict
@@ -190,9 +194,15 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
     _SamplesResult
         Wrapper around the constrained posterior samples.
     """
+    import time
+    from tqdm.auto import tqdm
+
     rng_key = jax.random.PRNGKey(rng_seed)
     init_key, tune_key, run_key = jax.random.split(rng_key, 3)
 
+    # --- 1. Initialize model ---
+    t0 = time.time()
+    print("MCLMC: initializing model...", flush=True)
     init_params, potential_fn_gen, postprocess_fn, _ = initialize_model(
         init_key, hslogistic,
         model_kwargs=model_kwargs,
@@ -200,13 +210,24 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
     )
     logdensity_fn = lambda position: -potential_fn_gen(position)
     initial_position = init_params.z
+    n_params = sum(v.size for v in jax.tree.leaves(initial_position))
+    print(f"MCLMC: {n_params} unconstrained parameters "
+          f"({time.time() - t0:.1f}s)", flush=True)
 
+    # --- 2. Initialize MCLMC state ---
+    t0 = time.time()
+    print("MCLMC: computing initial state...", flush=True)
     initial_state = blackjax.mcmc.mclmc.init(
         position=initial_position,
         logdensity_fn=logdensity_fn,
         rng_key=init_key,
     )
+    print(f"MCLMC: initial logdensity = {float(initial_state.logdensity):.2f} "
+          f"({time.time() - t0:.1f}s)", flush=True)
 
+    # --- 3. Tune L and step_size ---
+    t0 = time.time()
+    print(f"MCLMC: tuning ({num_warmup} steps)...", flush=True)
     kernel = lambda inverse_mass_matrix: blackjax.mcmc.mclmc.build_kernel(
         logdensity_fn=logdensity_fn,
         integrator=blackjax.mcmc.integrators.isokinetic_mclachlan,
@@ -220,28 +241,52 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, rng_seed):
         rng_key=tune_key,
         diagonal_preconditioning=False,
     )
+    L_val = float(sampler_params.L)
+    step_val = float(sampler_params.step_size)
+    print(f"MCLMC: tuning done — L={L_val:.3f}, step_size={step_val:.4f}, "
+          f"logdensity={float(state_after_tuning.logdensity):.2f} "
+          f"({time.time() - t0:.1f}s)", flush=True)
 
+    # --- 4. Sample (Python-level loop to avoid lax.scan compilation) ---
+    print(f"MCLMC: JIT-compiling step function...", flush=True)
     sampling_alg = blackjax.mclmc(
         logdensity_fn,
         L=sampler_params.L,
         step_size=sampler_params.step_size,
     )
+    step_fn = jax.jit(sampling_alg.step)
 
-    _, samples_unconstrained = blackjax.util.run_inference_algorithm(
-        rng_key=run_key,
-        initial_state=state_after_tuning,
-        inference_algorithm=sampling_alg,
-        num_steps=num_samples,
-        transform=lambda state, info: state.position,
-        progress_bar=True,
-    )
+    # Warm up JIT with one step
+    t0 = time.time()
+    warmup_key = jax.random.fold_in(run_key, 0)
+    state = step_fn(warmup_key, state_after_tuning)
+    state[0].logdensity.block_until_ready()  # force compilation
+    print(f"MCLMC: JIT compilation done ({time.time() - t0:.1f}s)", flush=True)
 
-    # transform unconstrained samples to constrained space
+    # Collect samples
+    t0 = time.time()
+    state_cur = state_after_tuning
+    sample_list = []
+    pbar = tqdm(range(num_samples), desc="MCLMC sampling", ncols=100)
+    for i in pbar:
+        step_key = jax.random.fold_in(run_key, i)
+        state_cur, info = step_fn(step_key, state_cur)
+        sample_list.append(state_cur.position)
+        if (i + 1) % max(1, num_samples // 10) == 0:
+            ld = float(state_cur.logdensity)
+            pbar.set_postfix_str(f"logp={ld:.1f}")
+    pbar.close()
+    elapsed = time.time() - t0
+    print(f"MCLMC: {num_samples} samples in {elapsed:.1f}s "
+          f"({num_samples / elapsed:.1f} samples/s)", flush=True)
+
+    # Stack samples and transform to constrained space
+    print("MCLMC: transforming to constrained space...", flush=True)
+    t0 = time.time()
+    samples_unconstrained = jax.tree.map(
+        lambda *arrs: jnp.stack(arrs), *sample_list)
     constrained = jax.vmap(postprocess_fn)(samples_unconstrained)
-
-    print(f"MCLMC: L={float(sampler_params.L):.3f}, "
-          f"step_size={float(sampler_params.step_size):.4f}, "
-          f"{num_samples} samples")
+    print(f"MCLMC: done ({time.time() - t0:.1f}s)", flush=True)
 
     return _SamplesResult(constrained)
 
