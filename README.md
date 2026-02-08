@@ -135,21 +135,22 @@ out = hs.run_analysis(
 
 #### Posterior summary
 
-The summary CSV (`demo_summary.csv`) contains tau, eta, the intercept,
-the top 5 penalized covariates by squared effect size, and m_eff
-(effective number of nonzero coefficients):
+The summary CSV (`demo_summary.csv`) contains tau, eta, m_eff
+(effective number of nonzero coefficients), the intercept, and the
+top 5 penalized covariates by squared effect size with their
+shrinkage factors (kappa):
 
-| parameter | mean | q0.03 | q0.97 | n_eff | r_hat |
-|---|---:|---:|---:|---:|---:|
-| tau | 0.1230 | 0.0230 | 0.3447 | 441 | 1.003 |
-| eta | 2.5431 | 1.2985 | 5.0621 | 519 | 1.003 |
-| Intercept | -0.6349 | -1.0356 | -0.2295 | 1016 | 0.999 |
-| x0 | 2.0450 | 1.4200 | 2.6893 | 1260 | 0.999 |
-| x1 | -1.6948 | -2.3079 | -1.1237 | 900 | 1.000 |
-| x2 | 0.7692 | 0.2870 | 1.2392 | 845 | 0.998 |
-| x14 | 0.3699 | -0.0073 | 0.8711 | 321 | 1.005 |
-| x9 | -0.1424 | -0.5753 | 0.0621 | 539 | 1.002 |
-| m_eff | 2.5881 | 1.2855 | 4.3928 | 534 | 1.001 |
+| parameter | kappa | mean | q0.03 | q0.97 | n_eff | r_hat |
+|---|---:|---:|---:|---:|---:|---:|
+| tau | | 0.1270 | 0.0293 | 0.3431 | 341 | 1.001 |
+| eta | | 2.5491 | 1.3315 | 4.9484 | 512 | 1.003 |
+| m_eff | | 2.6120 | 1.4180 | 4.5643 | 533 | 1.002 |
+| Intercept | | -0.5393 | -0.9367 | -0.1590 | 1312 | 0.999 |
+| x0 | 0.3393 | 1.9396 | 1.3800 | 2.5644 | 870 | 1.000 |
+| x1 | 0.3675 | -1.7760 | -2.4235 | -1.1970 | 830 | 1.003 |
+| x2 | 0.6231 | 0.8217 | 0.3026 | 1.2850 | 693 | 1.000 |
+| x14 | 0.8098 | 0.3825 | -0.0171 | 0.9235 | 382 | 1.001 |
+| x9 | 0.9239 | -0.1332 | -0.5503 | 0.0923 | 615 | 0.999 |
 
 The three true signals (x0, x1, x2) are recovered with the largest
 effect sizes.  The posterior mean of m_eff (2.59) is close to the true

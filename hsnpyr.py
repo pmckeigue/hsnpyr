@@ -785,20 +785,38 @@ def summary_report(mcmc, filepath, unpenalized_names=None,
     """
     chain_samples = mcmc.get_samples(group_by_chain=True)
 
-    def _row(name, x_chain):
+    def _row(name, x_chain, kappa_val=None):
         x_flat = x_chain.reshape(-1)
-        return {
+        d = {
             "parameter": name,
+            "kappa": kappa_val,
             "mean": float(jnp.mean(x_flat)),
             "q0.03": float(jnp.percentile(x_flat, 3)),
             "q0.97": float(jnp.percentile(x_flat, 97)),
             "n_eff": float(effective_sample_size(np.array(x_chain))),
             "r_hat": float(split_gelman_rubin(np.array(x_chain))),
         }
+        return d
 
+    # Compute shrinkage factors per covariate (kappa_j)
+    tau_ch = chain_samples["tau"][..., None]     # (chains, samples, 1)
+    eta_ch = chain_samples["eta"][..., None]
+    lambda_raw = (chain_samples["aux1_local"]
+                  * jnp.sqrt(chain_samples["aux2_local"]))
+    lambda_tilde_sq = ((eta_ch ** 2 * lambda_raw ** 2)
+                       / (eta_ch ** 2 + tau_ch ** 2 * lambda_raw ** 2))
+    kappa_all = 1.0 / (1.0 + tau_ch ** 2 * lambda_tilde_sq)  # (chains, S, J)
+    kappa_mean = np.array(kappa_all.reshape(-1, kappa_all.shape[-1]).mean(axis=0))
+
+    # m_eff
+    m_eff_chain = (1.0 - kappa_all).sum(axis=-1)  # (chains, samples)
+
+    # tau, eta, m_eff
     rows = [_row("tau", chain_samples["tau"]),
-            _row("eta", chain_samples["eta"])]
+            _row("eta", chain_samples["eta"]),
+            _row("m_eff", m_eff_chain)]
 
+    # unpenalized betas
     beta_u = chain_samples.get("beta_u")
     if beta_u is not None:
         U = beta_u.shape[-1]
@@ -813,18 +831,8 @@ def summary_report(mcmc, filepath, unpenalized_names=None,
         n_top = min(5, len(penalized_names))
         top_idx = np.argsort(beta_mean ** 2)[-n_top:][::-1]
         for idx in top_idx:
-            rows.append(_row(penalized_names[idx], beta_chain[..., idx]))
-
-    # effective number of nonzero coefficients (m_eff)
-    tau_ch = chain_samples["tau"][..., None]     # (chains, samples, 1)
-    eta_ch = chain_samples["eta"][..., None]
-    lambda_raw = (chain_samples["aux1_local"]
-                  * jnp.sqrt(chain_samples["aux2_local"]))
-    lambda_tilde_sq = ((eta_ch ** 2 * lambda_raw ** 2)
-                       / (eta_ch ** 2 + tau_ch ** 2 * lambda_raw ** 2))
-    kappa = 1.0 / (1.0 + tau_ch ** 2 * lambda_tilde_sq)
-    m_eff_chain = (1.0 - kappa).sum(axis=-1)    # (chains, samples)
-    rows.append(_row("m_eff", m_eff_chain))
+            rows.append(_row(penalized_names[idx], beta_chain[..., idx],
+                             kappa_val=round(float(kappa_mean[idx]), 4)))
 
     df = pd.DataFrame(rows)
     df.to_csv(filepath, index=False, float_format="%.4f")
