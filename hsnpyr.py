@@ -19,21 +19,10 @@ from numpyro.infer import MCMC, NUTS, Predictive
 from numpyro.diagnostics import effective_sample_size, split_gelman_rubin
 from numpyro.infer.util import initialize_model
 import blackjax
-import numpyro.util as _npyr_util
 
-# Force tqdm to use a fixed width so progress bars update in-place
-# even in non-TTY environments (cloud notebooks, piped output).
-_orig_tqdm = _npyr_util.tqdm_auto
-
-
-class _FixedWidthTqdm(_orig_tqdm):
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault("ncols", 88)
-        kwargs.setdefault("leave", True)
-        super().__init__(*args, **kwargs)
-
-
-_npyr_util.tqdm_auto = _FixedWidthTqdm
+# Ensure tqdm can detect a terminal width in non-TTY environments
+# (cloud notebooks, piped output) so progress bars update in-place.
+os.environ.setdefault("COLUMNS", "120")
 
 __all__ = [
     "fit", "predict", "crossvalidate",
