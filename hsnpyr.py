@@ -32,7 +32,8 @@ __all__ = [
     "learning_curve", "summary_report",
     "projpred_forward_search",
     "plot_learning_curve", "plot_pair_diagnostic",
-    "plot_wevid", "plot_forest", "plot_projpred",
+    "plot_wevid", "plot_forest", "plot_pairs", "plot_trace",
+    "plot_projpred",
     "run_analysis",
 ]
 
@@ -1136,6 +1137,124 @@ def plot_forest(beta_samples, penalized_names, filestem):
     return outpath
 
 
+def _m_eff_from_chain_samples(chain_samples):
+    """Compute m_eff (effective nonzero coefficients) per chain-sample.
+
+    Parameters
+    ----------
+    chain_samples : dict
+        Posterior samples with chain dimension, as returned by
+        ``result.get_samples(group_by_chain=True)``.
+
+    Returns
+    -------
+    ndarray (num_chains, num_samples)
+    """
+    tau_ch = chain_samples["tau"][..., None]
+    eta_ch = chain_samples["eta"][..., None]
+    lam_raw = (chain_samples["aux1_local"]
+               * jnp.sqrt(chain_samples["aux2_local"]))
+    lam_sq = ((eta_ch ** 2 * lam_raw ** 2)
+              / (eta_ch ** 2 + tau_ch ** 2 * lam_raw ** 2))
+    kappa = 1.0 / (1.0 + tau_ch ** 2 * lam_sq)
+    return (1.0 - kappa).sum(axis=-1)
+
+
+def plot_pairs(result, filestem):
+    """Pairs plot of tau, eta, and m_eff posterior samples.
+
+    Saves the figure to ``{filestem}_pairs.pdf``.
+
+    Parameters
+    ----------
+    result : MCMC or _SamplesResult
+        Fitted model.
+    filestem : str
+        Output file prefix.
+
+    Returns
+    -------
+    str
+        Path to the saved PDF.
+    """
+    chain_samples = result.get_samples(group_by_chain=True)
+    m_eff_ch = _m_eff_from_chain_samples(chain_samples)
+
+    idata = az.from_dict(posterior={
+        "tau": np.array(chain_samples["tau"]),
+        "eta": np.array(chain_samples["eta"]),
+        "m_eff": np.array(m_eff_ch),
+    })
+    axes = az.plot_pair(
+        idata, var_names=["tau", "eta", "m_eff"],
+        scatter_kwargs={"alpha": 0.3, "s": 10},
+    )
+    fig = (axes.ravel()[0].get_figure() if hasattr(axes, "ravel")
+           else axes.get_figure())
+    fig.set_size_inches(6, 5)
+    fig.tight_layout()
+    outpath = filestem + "_pairs.pdf"
+    fig.savefig(outpath)
+    plt.show()
+    plt.close(fig)
+    print(f"Plot saved to {outpath}")
+    return outpath
+
+
+def plot_trace(result, filestem, unpenalized_names=None):
+    """Trace plot of tau, eta, m_eff and top unpenalized coefficients.
+
+    Saves the figure to ``{filestem}_trace.pdf``.
+
+    Parameters
+    ----------
+    result : MCMC or _SamplesResult
+        Fitted model.
+    filestem : str
+        Output file prefix.
+    unpenalized_names : list of str, optional
+        Display names for the unpenalized coefficients (length U,
+        typically ``["Intercept", ...]``).
+
+    Returns
+    -------
+    str
+        Path to the saved PDF.
+    """
+    chain_samples = result.get_samples(group_by_chain=True)
+    m_eff_ch = _m_eff_from_chain_samples(chain_samples)
+
+    data = {
+        "tau": np.array(chain_samples["tau"]),
+        "eta": np.array(chain_samples["eta"]),
+        "m_eff": np.array(m_eff_ch),
+    }
+
+    # Add top 3 unpenalized coefficients (by absolute posterior mean)
+    beta_u_ch = chain_samples.get("beta_u")
+    if beta_u_ch is not None:
+        U = beta_u_ch.shape[-1]
+        names = (unpenalized_names if unpenalized_names is not None
+                 else [f"beta_u[{i}]" for i in range(U)])
+        abs_means = np.abs(np.array(beta_u_ch).reshape(-1, U).mean(axis=0))
+        n_show = min(3, U)
+        top_idx = np.argsort(abs_means)[-n_show:][::-1]
+        for idx in top_idx:
+            data[names[idx]] = np.array(beta_u_ch[..., idx])
+
+    idata = az.from_dict(posterior=data)
+    n_vars = len(data)
+    axes = az.plot_trace(idata, figsize=(10, 1.5 * n_vars))
+    fig = axes.ravel()[0].get_figure()
+    fig.tight_layout()
+    outpath = filestem + "_trace.pdf"
+    fig.savefig(outpath)
+    plt.show()
+    plt.close(fig)
+    print(f"Plot saved to {outpath}")
+    return outpath
+
+
 def _project_onto_submodel(mu, Z, w0=None):
     """Project reference model probabilities onto a submodel.
 
@@ -1563,6 +1682,9 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
 
     if is_nuts:
         plot_pair_diagnostic(result, filestem)
+    else:
+        plot_pairs(result, filestem)
+        plot_trace(result, filestem, unpenalized_names=unpenalized_names)
     plot_wevid(w, filestem)
 
     # --- 5. Projpred ---
