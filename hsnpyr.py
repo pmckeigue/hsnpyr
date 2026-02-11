@@ -33,7 +33,7 @@ __all__ = [
     "projpred_forward_search",
     "plot_learning_curve", "plot_pair_diagnostic",
     "plot_wevid", "plot_forest", "plot_pairs", "plot_trace", "plot_autocorr",
-    "plot_projpred",
+    "plot_mclmc_tuning", "plot_projpred",
     "sample_matched_controls",
     "run_analysis",
 ]
@@ -98,9 +98,12 @@ class _SamplesResult:
     per site so that ``get_samples(group_by_chain=True)`` works for
     computing r_hat and n_eff.
     """
-    def __init__(self, samples, num_chains=1):
+    def __init__(self, samples, num_chains=1, tuning_results=None,
+                 tuning_selected_idx=None):
         self._samples = samples      # (num_chains, num_samples, ...) per site
         self._num_chains = num_chains
+        self.tuning_results = tuning_results
+        self.tuning_selected_idx = tuning_selected_idx
 
     def get_samples(self, group_by_chain=False):
         if group_by_chain:
@@ -113,9 +116,9 @@ class _SamplesResult:
 
 
 def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
-        num_warmup=1000, num_samples=1000, num_chains=4,
+        num_warmup=1000, num_samples=None, num_chains=4,
         target_accept_prob=0.95, max_tree_depth=12, rng_seed=0,
-        sampler="nuts", print_summary=True):
+        sampler="nuts", thin=None, print_summary=True):
     """Fit the horseshoe logistic regression model via MCMC.
 
     Parameters
@@ -134,8 +137,9 @@ def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
         Global shrinkage scale.
     num_warmup : int
         Number of warmup (adaptation) iterations per chain.
-    num_samples : int
-        Number of posterior samples per chain.
+    num_samples : int or None
+        Number of posterior samples per chain.  Defaults to 50000 for
+        MCLMC and 1000 for NUTS when None.
     num_chains : int
         Number of MCMC chains.
     target_accept_prob : float
@@ -146,6 +150,10 @@ def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
         Random seed.
     sampler : {"nuts", "mclmc"}
         Sampling algorithm.
+    thin : int or None
+        Thinning factor applied to MCLMC samples (every *thin*-th sample
+        is retained).  Defaults to 5 for MCLMC and 1 for NUTS when None.
+        Ignored for NUTS.
     print_summary : bool
         If True, print the full NumPyro summary table to stdout.
 
@@ -161,6 +169,11 @@ def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
             raise ValueError(
                 f"{name} contains {n_bad} non-finite values (NaN/Inf). "
                 f"Clean the data before fitting.")
+    # Sampler-specific defaults
+    if num_samples is None:
+        num_samples = 50_000 if sampler == "mclmc" else 1000
+    if thin is None:
+        thin = 5 if sampler == "mclmc" else 1
     model_kwargs = dict(X_u=X_u, X=X, y=y,
                         slab_scale=slab_scale, slab_df=slab_df,
                         scale_global=scale_global)
@@ -182,18 +195,19 @@ def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
         return mcmc
     elif sampler == "mclmc":
         return _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains,
-                          rng_seed)
+                          rng_seed, thin=thin)
     else:
         raise ValueError(f"Unknown sampler: {sampler!r}. Use 'nuts' or 'mclmc'.")
 
 
-def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
+def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
+               thin=1):
     """Fit using the MCLMC sampler via BlackJAX.
 
-    Tunes L and step_size once, then runs ``num_chains`` independent
-    sampling chains sequentially.  Uses a Python-level sampling loop
-    (instead of ``jax.lax.scan``) to avoid excessive XLA compilation
-    time with high-dimensional models.
+    Runs 5 tuning attempts and selects the median step size for
+    robustness, then runs ``num_chains`` independent sampling chains.  Uses a Python-level sampling loop (instead of
+    ``jax.lax.scan``) to avoid excessive XLA compilation time with
+    high-dimensional models.
 
     Parameters
     ----------
@@ -207,14 +221,20 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
         Number of independent chains.
     rng_seed : int
         Random seed.
+    thin : int
+        Thinning factor: keep every *thin*-th sample.
 
     Returns
     -------
     _SamplesResult
-        Wrapper with samples shaped ``(num_chains, num_samples, ...)``.
+        Wrapper with samples shaped ``(num_chains, num_retained, ...)``.
     """
     import time
+    import sys
     from tqdm.auto import tqdm
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    NUM_TUNE_RUNS = 5
 
     rng_key = jax.random.PRNGKey(rng_seed)
     init_key, tune_key, run_key = jax.random.split(rng_key, 3)
@@ -244,10 +264,10 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
     print(f"MCLMC: initial logdensity = {float(initial_state.logdensity):.2f} "
           f"({time.time() - t0:.1f}s)", flush=True)
 
-    # --- 3. Tune L and step_size (single tuning, shared across chains) ---
+    # --- 3. Tune L and step_size (parallel runs, median selection) ---
     tune_steps = max(num_warmup, 3 * n_params)
     t0 = time.time()
-    print(f"MCLMC: tuning ({tune_steps} steps, "
+    print(f"MCLMC: tuning ({tune_steps} steps x {NUM_TUNE_RUNS} runs, "
           f"diagonal preconditioning)...", flush=True)
     kernel = lambda inverse_mass_matrix: blackjax.mcmc.mclmc.build_kernel(
         logdensity_fn=logdensity_fn,
@@ -255,42 +275,72 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
         inverse_mass_matrix=inverse_mass_matrix,
     )
 
-    MAX_TUNE_RETRIES = 3
-    for tune_attempt in range(MAX_TUNE_RETRIES):
-        cur_tune_key = (tune_key if tune_attempt == 0
-                        else jax.random.fold_in(tune_key, tune_attempt))
-        (state_after_tuning, sampler_params, _) = (
-            blackjax.mclmc_find_L_and_step_size(
+    tune_keys = jax.random.split(tune_key, NUM_TUNE_RUNS)
+
+    def _run_one_tuning(idx):
+        """Run a single tuning attempt; return a result dict."""
+        try:
+            (state, params, _) = blackjax.mclmc_find_L_and_step_size(
                 mclmc_kernel=kernel,
                 num_steps=tune_steps,
                 state=initial_state,
-                rng_key=cur_tune_key,
+                rng_key=tune_keys[idx],
                 diagonal_preconditioning=True,
-            ))
-        L_val = float(sampler_params.L)
-        step_val = float(sampler_params.step_size)
-        ld_val = float(state_after_tuning.logdensity)
-        print(f"MCLMC: tuning done — L={L_val:.3f}, step_size={step_val:.4f}, "
-              f"logdensity={ld_val:.2f} "
-              f"({time.time() - t0:.1f}s)", flush=True)
+            )
+            L_val = float(params.L)
+            step_val = float(params.step_size)
+            ld_val = float(state.logdensity)
+            valid = (step_val > 0 and np.isfinite(step_val)
+                     and np.isfinite(ld_val))
+            return {
+                "idx": idx, "L": L_val, "step_size": step_val,
+                "logdensity": ld_val, "valid": valid,
+                "state": state, "sampler_params": params,
+            }
+        except Exception as e:
+            return {
+                "idx": idx, "L": float("nan"), "step_size": float("nan"),
+                "logdensity": float("nan"), "valid": False,
+                "state": None, "sampler_params": None, "error": str(e),
+            }
 
-        # Check for degenerate tuning results
-        if step_val > 0 and np.isfinite(step_val) and np.isfinite(ld_val):
-            break
-        problem = ("step_size=0" if step_val == 0
-                   else f"step_size={step_val}" if not np.isfinite(step_val)
-                   else f"logdensity={ld_val}")
-        if tune_attempt < MAX_TUNE_RETRIES - 1:
-            print(f"MCLMC: WARNING — degenerate tuning ({problem}), "
-                  f"retrying with different random key "
-                  f"(attempt {tune_attempt + 2}/{MAX_TUNE_RETRIES})",
-                  flush=True)
-            t0 = time.time()
-        else:
-            raise RuntimeError(
-                f"MCLMC tuning failed after {MAX_TUNE_RETRIES} attempts "
-                f"({problem}). Try increasing num_warmup or using "
-                f"sampler='nuts'.")
+    # Run sequentially — NumPyro's logdensity_fn is not thread-safe
+    tuning_results = [_run_one_tuning(i) for i in range(NUM_TUNE_RUNS)]
+
+    # Print summary of each tuning run
+    for r in tuning_results:
+        status = "OK" if r["valid"] else "DEGENERATE"
+        err = r.get("error", "")
+        extra = f" ({err})" if err else ""
+        print(f"  run {r['idx']+1}: L={r['L']:.3f}, "
+              f"step_size={r['step_size']:.4f}, "
+              f"logdensity={r['logdensity']:.2f} [{status}]{extra}",
+              flush=True)
+
+    # Select best tuning run
+    valid_runs = [r for r in tuning_results if r["valid"]]
+    if not valid_runs:
+        raise RuntimeError(
+            f"MCLMC tuning failed: all {NUM_TUNE_RUNS} runs produced "
+            f"degenerate results. Try increasing num_warmup or using "
+            f"sampler='nuts'.")
+
+    if len(valid_runs) >= 3:
+        # Sort by step_size and pick the median
+        valid_runs.sort(key=lambda r: r["step_size"])
+        selected = valid_runs[len(valid_runs) // 2]
+    else:
+        # Few valid runs — pick the one with best (highest) logdensity
+        selected = max(valid_runs, key=lambda r: r["logdensity"])
+
+    selected_idx = selected["idx"]
+    state_after_tuning = selected["state"]
+    sampler_params = selected["sampler_params"]
+
+    print(f"MCLMC: selected run {selected_idx+1} — "
+          f"L={selected['L']:.3f}, step_size={selected['step_size']:.4f}, "
+          f"logdensity={selected['logdensity']:.2f} "
+          f"({time.time() - t0:.1f}s)", flush=True)
 
     # --- 4. Sample num_chains chains (Python-level loop) ---
     L_tuned = sampler_params.L
@@ -317,8 +367,6 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
     print(f"MCLMC: JIT compilation done ({time.time() - t0:.1f}s)", flush=True)
 
     # --- Helper: sample one chain (no progress bar — used by threads) ---
-    import sys
-
     def _sample_chain(chain_idx, step_fn_, run_key_, state0, n_samples):
         """Return (sample_list, None) on success, (None, fail_step) on NaN."""
         chain_key = jax.random.fold_in(run_key_, chain_idx)
@@ -345,7 +393,6 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
 
     # Run all chains with automatic step-size retry on NaN divergence.
     # If any chain hits NaN, halve step_size and restart all chains.
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     for retry in range(MAX_RETRIES + 1):
         t0 = time.time()
         nan_detected = False
@@ -439,7 +486,13 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
     print(f"MCLMC: {num_chains} x {num_samples} samples in {elapsed:.1f}s "
           f"[step_size={float(step_size_cur):.4f}]", flush=True)
 
-    # Transform each chain to constrained space, then stack
+    # --- 5. Thin and transform to constrained space ---
+    if thin > 1:
+        all_chain_samples = [ch[::thin] for ch in all_chain_samples]
+        n_retained = len(all_chain_samples[0])
+        print(f"MCLMC: thinned by {thin} — {n_retained} samples "
+              f"retained per chain", flush=True)
+
     print("MCLMC: transforming to constrained space...", flush=True)
     t0 = time.time()
     chain_constrained = []
@@ -448,12 +501,14 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed):
             lambda *arrs: jnp.stack(arrs), *chain_samples)
         constrained = jax.vmap(postprocess_fn)(unconstrained)
         chain_constrained.append(constrained)
-    # Stack to (num_chains, num_samples, ...) per site
+    # Stack to (num_chains, num_retained, ...) per site
     all_constrained = jax.tree.map(
         lambda *arrs: jnp.stack(arrs), *chain_constrained)
     print(f"MCLMC: done ({time.time() - t0:.1f}s)", flush=True)
 
-    return _SamplesResult(all_constrained, num_chains=num_chains)
+    return _SamplesResult(all_constrained, num_chains=num_chains,
+                          tuning_results=tuning_results,
+                          tuning_selected_idx=selected_idx)
 
 
 def predict(result, X_u_new, X_new, slab_scale=1.0, slab_df=4.0,
@@ -737,7 +792,7 @@ def _cv_fold_worker(fold_args):
     (k, K, train_idx, test_idx, X_u, X, y,
      slab_scale, slab_df, scale_global,
      num_warmup, num_samples, num_chains,
-     target_accept_prob, max_tree_depth, rng_seed, sampler) = fold_args
+     target_accept_prob, max_tree_depth, rng_seed, sampler, thin) = fold_args
 
     print(f"\n--- Fold {k+1}/{K}: train={len(train_idx)}, test={len(test_idx)} ---")
     result_k = fit(
@@ -747,7 +802,7 @@ def _cv_fold_worker(fold_args):
         num_warmup=num_warmup, num_samples=num_samples,
         num_chains=num_chains, target_accept_prob=target_accept_prob,
         max_tree_depth=max_tree_depth, rng_seed=rng_seed + k,
-        sampler=sampler,
+        sampler=sampler, thin=thin,
     )
     probs_k = predict(
         result_k, jnp.array(X_u[test_idx]), jnp.array(X[test_idx]),
@@ -758,9 +813,9 @@ def _cv_fold_worker(fold_args):
 
 
 def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
-                  scale_global=1.0, num_warmup=1000, num_samples=1000,
+                  scale_global=1.0, num_warmup=1000, num_samples=None,
                   num_chains=4, target_accept_prob=0.95, max_tree_depth=12,
-                  rng_seed=0, sampler="nuts", max_workers=None):
+                  rng_seed=0, sampler="nuts", thin=None, max_workers=None):
     """K-fold cross-validation with automatic parallelisation.
 
     Fits the model on K-1 folds and predicts the held-out fold,
@@ -776,7 +831,8 @@ def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
     slab_scale, slab_df, scale_global : float
         Horseshoe prior parameters.
     num_warmup, num_samples, num_chains : int
-        MCMC sampler settings.
+        MCMC sampler settings.  ``num_samples`` and ``thin`` default
+        to sampler-specific values (see :func:`fit`).
     target_accept_prob : float
         NUTS target acceptance probability.
     max_tree_depth : int
@@ -785,6 +841,8 @@ def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
         Random seed (incremented per fold).
     sampler : {"nuts", "mclmc"}
         Sampling algorithm.
+    thin : int or None
+        Thinning factor (see :func:`fit`).
     max_workers : int or None
         Maximum parallel fold workers.  None uses all available CPUs
         subject to a memory-based limit.
@@ -834,7 +892,7 @@ def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
             k, K, train_idx, test_idx, X_u, X, y,
             slab_scale, slab_df, scale_global,
             num_warmup, num_samples, num_chains,
-            target_accept_prob, max_tree_depth, rng_seed, sampler,
+            target_accept_prob, max_tree_depth, rng_seed, sampler, thin,
         ))
 
     if n_workers > 1:
@@ -867,8 +925,8 @@ def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
 
 def learning_curve(X_u, X, y, K_values=(2, 3, 4, 5), slab_scale=1.0,
                    slab_df=4.0, scale_global=1.0, num_warmup=1000,
-                   num_samples=1000, num_chains=4, target_accept_prob=0.95,
-                   max_tree_depth=12, rng_seed=0, sampler="nuts",
+                   num_samples=None, num_chains=4, target_accept_prob=0.95,
+                   max_tree_depth=12, rng_seed=0, sampler="nuts", thin=None,
                    max_workers=None):
     """Learning curve: information for discrimination vs training size.
 
@@ -885,13 +943,16 @@ def learning_curve(X_u, X, y, K_values=(2, 3, 4, 5), slab_scale=1.0,
     slab_scale, slab_df, scale_global : float
         Horseshoe prior parameters.
     num_warmup, num_samples, num_chains : int
-        MCMC sampler settings.
+        MCMC sampler settings.  ``num_samples`` and ``thin`` default
+        to sampler-specific values (see :func:`fit`).
     target_accept_prob, max_tree_depth : float, int
         NUTS settings.
     rng_seed : int
         Random seed.
     sampler : {"nuts", "mclmc"}
         Sampling algorithm.
+    thin : int or None
+        Thinning factor (see :func:`fit`).
     max_workers : int or None
         Forwarded to :func:`crossvalidate`.
 
@@ -917,7 +978,7 @@ def learning_curve(X_u, X, y, K_values=(2, 3, 4, 5), slab_scale=1.0,
             num_samples=num_samples, num_chains=num_chains,
             target_accept_prob=target_accept_prob,
             max_tree_depth=max_tree_depth, rng_seed=rng_seed,
-            sampler=sampler, max_workers=max_workers,
+            sampler=sampler, thin=thin, max_workers=max_workers,
         )
         train_sizes.append(n_train)
         info_values.append(cv["info_discrim"])
@@ -1344,6 +1405,60 @@ def plot_autocorr(result, filestem, penalized_names=None):
     return outpath
 
 
+def plot_mclmc_tuning(result, filestem):
+    """Diagnostic plot for MCLMC parallel tuning runs.
+
+    Three vertical subplots show logdensity, L, and step_size for each
+    tuning run.  The selected run is highlighted in red, other valid
+    runs in blue, and degenerate runs in grey.
+
+    Parameters
+    ----------
+    result : _SamplesResult
+        Fitted MCLMC result with ``tuning_results`` attribute.
+    filestem : str
+        Output file prefix.
+
+    Returns
+    -------
+    str or None
+        Path to the saved PNG, or None if no tuning data is available.
+    """
+    tuning = getattr(result, "tuning_results", None)
+    if tuning is None:
+        return None
+    selected_idx = getattr(result, "tuning_selected_idx", None)
+
+    fig, axes = plt.subplots(3, 1, figsize=(5, 6), sharex=True)
+    metrics = [("logdensity", "Log density"), ("L", "L"),
+               ("step_size", "Step size")]
+
+    for ax, (key, label) in zip(axes, metrics):
+        for r in tuning:
+            i = r["idx"]
+            val = r[key]
+            if i == selected_idx:
+                color, marker, zorder = "red", "D", 10
+            elif r["valid"]:
+                color, marker, zorder = "steelblue", "o", 5
+            else:
+                color, marker, zorder = "grey", "x", 1
+            ax.plot(i + 1, val, marker=marker, color=color, markersize=8,
+                    zorder=zorder)
+        ax.set_ylabel(label)
+        ax.set_xlim(0.5, len(tuning) + 0.5)
+
+    axes[-1].set_xlabel("Tuning run")
+    axes[-1].set_xticks(range(1, len(tuning) + 1))
+    axes[0].set_title("MCLMC tuning diagnostics")
+    fig.tight_layout()
+    outpath = filestem + "_mclmc_tuning.png"
+    fig.savefig(outpath, dpi=150)
+    plt.close(fig)
+    print(f"Plot saved to {outpath}")
+    return outpath
+
+
 def _project_onto_submodel(mu, Z, w0=None):
     """Project reference model probabilities onto a submodel.
 
@@ -1607,9 +1722,9 @@ def sample_matched_controls(df, case_col, sex_col, age_col, R=1,
 def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
                  slab_scale=2.0, slab_df=4.0, p0=None, scale_global=None,
                  standardize=True, sampler="nuts", crossvalidate_=False,
-                 num_warmup=1000, num_samples=1000, num_chains=4,
+                 num_warmup=1000, num_samples=None, num_chains=4,
                  target_accept_prob=0.95, max_tree_depth=12,
-                 rng_seed=0, projpred_V=None, max_workers=None):
+                 rng_seed=0, thin=None, projpred_V=None, max_workers=None):
     """High-level entry point: fit horseshoe logistic regression from a DataFrame.
 
     Extracts arrays, estimates ``scale_global`` if needed, fits the
@@ -1654,8 +1769,9 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         projpred are skipped.
     num_warmup : int
         Warmup iterations per chain.
-    num_samples : int
-        Posterior samples per chain.
+    num_samples : int or None
+        Posterior samples per chain.  Defaults to sampler-specific
+        values (see :func:`fit`).
     num_chains : int
         Number of MCMC chains.
     target_accept_prob : float
@@ -1664,6 +1780,8 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         NUTS maximum tree depth.
     rng_seed : int
         Random seed.
+    thin : int or None
+        Thinning factor (see :func:`fit`).
     projpred_V : int or None
         If not None, run projection predictive forward search selecting
         up to this many variables.
@@ -1758,7 +1876,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
             num_warmup=num_warmup, num_samples=num_samples,
             num_chains=num_chains, target_accept_prob=target_accept_prob,
             max_tree_depth=max_tree_depth, rng_seed=rng_seed,
-            sampler=sampler, max_workers=max_workers,
+            sampler=sampler, thin=thin, max_workers=max_workers,
         )
         plot_learning_curve(train_sizes, info_values, filestem)
 
@@ -1768,7 +1886,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
             num_warmup=num_warmup, num_samples=num_samples,
             num_chains=num_chains, target_accept_prob=target_accept_prob,
             max_tree_depth=max_tree_depth, rng_seed=rng_seed,
-            sampler=sampler, max_workers=max_workers,
+            sampler=sampler, thin=thin, max_workers=max_workers,
         )
         plot_wevid(cv_result["wevid"], filestem + "_cv")
 
@@ -1786,7 +1904,8 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
             slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
             num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains,
             target_accept_prob=target_accept_prob, max_tree_depth=max_tree_depth,
-            rng_seed=rng_seed, sampler=sampler, print_summary=False,
+            rng_seed=rng_seed, sampler=sampler, thin=thin,
+            print_summary=False,
         )
     except RuntimeError as e:
         print(f"\nrun_analysis: sampling failed — {e}")
@@ -1849,6 +1968,8 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         plot_pairs(result, filestem)
         plot_trace(result, filestem, penalized_names=list(penalized_cols))
         plot_autocorr(result, filestem, penalized_names=list(penalized_cols))
+        if getattr(result, "tuning_results", None) is not None:
+            plot_mclmc_tuning(result, filestem)
     plot_wevid(w, filestem)
 
     # --- 5. Projpred ---

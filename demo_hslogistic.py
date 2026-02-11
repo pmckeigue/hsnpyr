@@ -94,6 +94,29 @@ def main():
     print(f"KL path: {[f'{k:.6f}' for k in kl_path]}")
     hs.plot_projpred(selected, kl_path, kl_null, "hslogistic")
 
+    # ---- MCLMC sampler ----
+    print("\n" + "=" * 60)
+    print("MCLMC sampler demo")
+    print("=" * 60)
+
+    mclmc_result = hs.fit(
+        jnp.array(X_u), jnp.array(X), jnp.array(y),
+        slab_scale=2.0, slab_df=4.0, scale_global=scale_global,
+        num_warmup=500, num_samples=10_000, num_chains=2,
+        rng_seed=0, sampler="mclmc",
+    )
+
+    hs.summary_report(mclmc_result, "hslogistic_mclmc_summary.csv")
+
+    beta_mclmc = mclmc_result.get_samples()["beta"].mean(axis=0)
+    print("\nMCLMC vs NUTS penalized betas:")
+    for j in range(J):
+        flag = " *" if beta_true[j] != 0 else ""
+        print(f"  beta[{j:2d}]: true={beta_true[j]:+6.2f}  "
+              f"NUTS={beta_hat[j]:+6.3f}  MCLMC={beta_mclmc[j]:+6.3f}{flag}")
+
+    hs.plot_mclmc_tuning(mclmc_result, "hslogistic_mclmc")
+
     # ---- run_analysis: high-level DataFrame interface ----
     print("\n" + "=" * 60)
     print("run_analysis demo (DataFrame interface)")

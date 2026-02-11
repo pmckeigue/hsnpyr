@@ -82,6 +82,32 @@ Step 2 runs only the learning curve (K=2..5) and 5-fold cross-validation,
 skipping the full model fit.  It writes learning curve and CV weight of
 evidence plots, and returns the CV results.
 
+### Using MCLMC
+
+The MCLMC sampler (via BlackJAX) is faster than NUTS for
+high-dimensional datasets.  Pass `sampler="mclmc"` to `fit()` or
+`run_analysis()`.
+
+```python
+# Direct fit
+result = hs.fit(X_u, X, y, slab_scale=2.0, slab_df=4.0,
+                scale_global=0.01, sampler="mclmc")
+
+# Via run_analysis
+out = hs.run_analysis(df, y_col="outcome", ..., sampler="mclmc")
+```
+
+**Defaults for MCLMC** (when `num_samples` and `thin` are not
+specified): 50,000 samples per chain with thinning factor 5, yielding
+10,000 retained samples per chain.  NUTS defaults remain 1,000 samples
+with no thinning.
+
+**Robust tuning**: MCLMC runs 5 tuning attempts and selects the median
+step size from valid runs.  This guards against occasional
+degenerate tuning results (NaN or extreme step sizes).  Use
+`plot_mclmc_tuning(result, filestem)` to inspect the tuning
+diagnostics.
+
 For direct control over the arrays, the lower-level functions are also
 available:
 
@@ -267,6 +293,7 @@ not yet saturated, indicating that more data would improve prediction.
 | `plot_pair_diagnostic` | log(tau)--log(eta) scatter with divergences |
 | `plot_wevid` | Weight of evidence density plot |
 | `plot_forest` | Forest plot of penalized betas with 90% CIs |
+| `plot_mclmc_tuning` | MCLMC parallel tuning diagnostic plot |
 | `plot_projpred` | KL divergence path from projpred search |
 
 ## References
