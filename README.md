@@ -138,11 +138,11 @@ out = hs.run_analysis(
 The summary CSV (`demo_summary.csv`) contains posterior summaries for: 
 
 * the global shrinkage parameter (tau)
-* the slab width (eta).  Even the largest coefficients will be regularized by a Gaussian prior with  mean zero and scale eta. 
+* the slab width (eta).  
 * the effective number of nonzero coefficients (m_eff)
 * the intercept of the regression model
 * the coefficients for the top 5 penalized covariates by squared effect size with their
-shrinkage factors (kappa).  A shrinkage factor of 1 means complete shrinkge: the coefficient will be close to zero. 
+shrinkage factors (kappa).  A shrinkage factor of 1 indicates complete shrinkage: the coefficient will be close to zero.  With a regularized horseshoe prior, even the largest coefficients are regularized by a Gaussian prior with  mean zero and scale eta, so the shrinkage factor can never be close to zero unless the sample size is large enough for the likelihood to overwhelm this prior.  
 
 | parameter | kappa | mean | q0.03 | q0.97 | n_eff | r_hat |
 |---|---:|---:|---:|---:|---:|---:|
