@@ -7,7 +7,7 @@ evaluation and variable selection.  A typical use for this module is to learn to
 
 - **Regularized horseshoe prior** (Piironen & Vehtari, 2017) with separate
   unpenalized and penalized covariate groups
-- **Samplers**: No-U-turn sampler (NUTS) via NumPyro and microcanonical Langevin-like Monte Carlo (MCLMC) via BlackJAX.  The MCLMC sampler is faster than NUTS for high-dimensional datasets, but is still experimental.  
+- **Samplers**: No-U-turn sampler (NUTS) via NumPyro and microcanonical Langevin Monte Carlo (MCLMC) via BlackJAX.  The MCLMC sampler is faster than NUTS for high-dimensional datasets, but is still experimental.  
 - **Evaluation**: C-statistic, logarithmic score, weight of evidence
   densities, and expected information for discrimination (McKeigue, 2019)
 - **K-fold cross-validation** with automatic memory-aware parallelism
