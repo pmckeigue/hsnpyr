@@ -1,13 +1,13 @@
 # hsnpyr
 
 Regularized horseshoe logistic regression in NumPyro, with tools for
-evaluation and variable selection.
+evaluation and variable selection.  A typical use for this module is to learn to predict disease status from a high-dimensional panel of biomarkers. 
 
 ## Features
 
 - **Regularized horseshoe prior** (Piironen & Vehtari, 2017) with separate
   unpenalized and penalized covariate groups
-- **Samplers**: No-U-turn sampler (NUTS) via NumPyro and microcanonical Langevin-like Monte Carlo (MCLMC) via BlackJAX
+- **Samplers**: No-U-turn sampler (NUTS) via NumPyro and microcanonical Langevin-like Monte Carlo (MCLMC) via BlackJAX.  The MCLMC sampler is faster than NUTS for high-dimensional datasets, but is still experimental.  
 - **Evaluation**: C-statistic, logarithmic score, weight of evidence
   densities, and expected information for discrimination (McKeigue, 2019)
 - **K-fold cross-validation** with automatic memory-aware parallelism
@@ -135,10 +135,14 @@ out = hs.run_analysis(
 
 #### Posterior summary
 
-The summary CSV (`demo_summary.csv`) contains tau, eta, m_eff
-(effective number of nonzero coefficients), the intercept, and the
-top 5 penalized covariates by squared effect size with their
-shrinkage factors (kappa):
+The summary CSV (`demo_summary.csv`) contains posterior summaries for: 
+
+* the global shrinkage parameter (tau)
+* the slab width (eta).  Even the largest coefficients will be regularized by a Gaussian prior with  mean zero and scale eta. 
+* the effective number of nonzero coefficients (m_eff)
+* the intercept of the regression model
+* the coefficients for the top 5 penalized covariates by squared effect size with their
+shrinkage factors (kappa).  A shrinkage factor of 1 means complete shrinkge: the coefficient will be close to zero. 
 
 | parameter | kappa | mean | q0.03 | q0.97 | n_eff | r_hat |
 |---|---:|---:|---:|---:|---:|---:|
