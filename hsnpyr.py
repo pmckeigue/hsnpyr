@@ -1685,6 +1685,10 @@ def plot_mclmc_tuning_traces(result, filestem):
                 if 0 < bnd < len(ss):
                     ax.axvline(bnd, color="grey", linestyle="--",
                                linewidth=0.8)
+        # Crop energy_var y-axis to 95th percentile so the trend is visible
+        ev_upper = float(np.percentile(ev, 95)) * 2.0
+        if ev_upper > 0:
+            axes[2].set_ylim(0, ev_upper)
 
         axes[-1].set_xlabel("Tuning iteration")
         title = f"Tuning run {i + 1}"

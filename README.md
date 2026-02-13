@@ -272,6 +272,95 @@ The out-of-sample predictive performance is lower than the in-sample
 metrics, as expected.  The learning curve shows that performance has
 not yet saturated, indicating that more data would improve prediction.
 
+### Step 3: MCLMC sampler
+
+The same simulated dataset can be fitted with MCLMC instead of NUTS:
+
+```python
+out_mclmc = hs.run_analysis(
+    df, y_col="outcome",
+    unpenalized_cols=[],
+    penalized_cols=penalized_names,
+    filestem="demo_mclmc",
+    slab_scale=2.0, slab_df=4.0, p0=3,
+    num_warmup=500, num_samples=10_000, num_chains=2,
+    rng_seed=0, sampler="mclmc",
+)
+```
+
+MCLMC produces posterior estimates consistent with NUTS:
+
+```
+  run 1: L=6.724, step_size=1.5275, logdensity=-178.70 [OK]
+  run 2: L=7.004, step_size=1.6372, logdensity=-185.26 [OK]
+  run 3: L=6.399, step_size=1.4553, logdensity=-184.80 [OK]
+  run 4: L=7.298, step_size=1.9752, logdensity=-183.06 [OK]
+  run 5: L=8.081, step_size=2.4526, logdensity=-171.20 [OK]
+MCLMC: selected run 2 — L=7.004, step_size=1.6372
+```
+
+#### MCLMC tuning diagnostics
+
+The summary plot shows the final tuned values across the 5 tuning runs.
+The selected run (median step size) is marked with a red diamond:
+
+![MCLMC tuning summary](img/mclmc_tuning.png)
+
+#### Tuning trace plots
+
+The per-iteration trace plots reveal the within-run dynamics of
+BlackJAX's 3-stage tuning algorithm.  Vertical dashed lines mark
+the stage boundaries.
+
+**Selected run (run 2):**
+
+![Tuning run 2 (selected)](img/mclmc_tuning_run2_selected.png)
+
+**Run 4 (larger final step size):**
+
+![Tuning run 4](img/mclmc_tuning_run4.png)
+
+#### Interpretation
+
+BlackJAX's MCLMC tuning has three stages, visible between the dashed
+lines:
+
+1. **Stage 1** (iterations 1--50): step-size adaptation without
+   preconditioning.  The step size converges from its initial value
+   of sqrt(dim)/4 towards a stable value around 1.3--1.8.  Energy
+   variance shows frequent spikes as the integrator explores the
+   unconditioned geometry.
+
+2. **Stage 2** (iterations 50--116): the diagonal preconditioner
+   (mass matrix) is computed from the position variances accumulated
+   in stage 1, and the step size is readjusted.  A sharp spike in
+   step_size appears around iteration 100 when the new preconditioner
+   suddenly changes the effective geometry.  The readjustment
+   sub-stage (between the two dashed lines) brings the step size back
+   to a stable value, but the spike means the final step size depends
+   sensitively on how far the readjustment progresses.
+
+3. **Stage 3** (iterations 116 onwards): step size is fixed, and L
+   (trajectory length) is set from the effective sample size of a
+   short sampling run.  Energy variance is generally lower in this
+   stage.
+
+**L (trajectory length)** stays constant at sqrt(dim) = 8.0 throughout
+stages 1--2.  Only after stage 3 does L change to its ESS-based value
+(6.4--8.1 across runs).
+
+**energy_change^2** (the energy variance proxy) is spiky throughout,
+reflecting the heavy-tailed geometry of the horseshoe posterior.  The
+target energy variance is `dim * desired_energy_var` = 64 * 5e-4 =
+0.032.  The y-axis is cropped to twice the 95th percentile to make the
+overall trend visible despite large spikes.
+
+The variation in final step sizes (1.45--2.45) across the 5 runs arises
+mainly from the stage 2 preconditioner spike: different random seeds
+produce different spike heights, and the limited readjustment sub-stage
+does not always fully converge.  The median selection strategy mitigates
+this by discarding outlier runs.
+
 ## API
 
 | Function | Description |
@@ -294,6 +383,7 @@ not yet saturated, indicating that more data would improve prediction.
 | `plot_wevid` | Weight of evidence density plot |
 | `plot_forest` | Forest plot of penalized betas with 90% CIs |
 | `plot_mclmc_tuning` | MCLMC parallel tuning diagnostic plot |
+| `plot_mclmc_tuning_traces` | Per-run tuning trace plots (step_size, L, energy variance) |
 | `plot_projpred` | KL divergence path from projpred search |
 
 ## References
