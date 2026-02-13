@@ -33,7 +33,7 @@ __all__ = [
     "projpred_forward_search",
     "plot_learning_curve", "plot_pair_diagnostic",
     "plot_wevid", "plot_forest", "plot_pairs", "plot_trace", "plot_autocorr",
-    "plot_mclmc_tuning", "plot_projpred",
+    "plot_mclmc_tuning", "plot_mclmc_tuning_traces", "plot_projpred",
     "sample_matched_controls",
     "run_analysis",
 ]
@@ -200,6 +200,177 @@ def fit(X_u, X, y, slab_scale=1.0, slab_df=4.0, scale_global=1.0,
         raise ValueError(f"Unknown sampler: {sampler!r}. Use 'nuts' or 'mclmc'.")
 
 
+def _mclmc_find_L_and_step_size_with_trace(
+    mclmc_kernel, num_steps, state, rng_key,
+    frac_tune1=0.1, frac_tune2=0.1, frac_tune3=0.1,
+    desired_energy_var=5e-4, trust_in_estimate=1.5,
+    num_effective_samples=150, diagonal_preconditioning=True,
+):
+    """Like ``blackjax.mclmc_find_L_and_step_size`` but returns per-step traces.
+
+    Returns
+    -------
+    state : MCLMCState
+    params : MCLMCAdaptationState
+    total_steps : int
+    trace : dict
+        ``step_size``, ``L``, ``energy_var`` arrays (one entry per tuning step).
+    """
+    from blackjax.adaptation.mclmc_adaptation import (
+        MCLMCAdaptationState, handle_nans,
+    )
+    from blackjax.util import (
+        generate_unit_vector, incremental_value_update, pytree_size,
+    )
+    from blackjax.diagnostics import effective_sample_size as bjx_ess
+    from jax.flatten_util import ravel_pytree
+
+    dim = pytree_size(state.position)
+    params = MCLMCAdaptationState(
+        jnp.sqrt(dim), jnp.sqrt(dim) * 0.25,
+        inverse_mass_matrix=jnp.ones((dim,)),
+    )
+
+    part1_key, part2_key = jax.random.split(rng_key, 2)
+    num_steps1 = round(num_steps * frac_tune1)
+    num_steps2 = round(num_steps * frac_tune2)
+    num_steps2_extra = (num_steps2 // 3) if diagonal_preconditioning else 0
+    num_steps3 = round(num_steps * frac_tune3)
+
+    decay_rate = (num_effective_samples - 1.0) / (num_effective_samples + 1.0)
+
+    # -- predictor: one MCMC step + step-size update --
+    def predictor(previous_state, params, adaptive_state, rng_key):
+        time, x_average, step_size_max = adaptive_state
+        rng_key, nan_key = jax.random.split(rng_key)
+        next_state, info = mclmc_kernel(params.inverse_mass_matrix)(
+            rng_key=rng_key, state=previous_state,
+            L=params.L, step_size=params.step_size,
+        )
+        success, state, step_size_max, energy_change = handle_nans(
+            previous_state, next_state, params.step_size,
+            step_size_max, info.energy_change, nan_key,
+        )
+        xi = (jnp.square(energy_change) / (dim * desired_energy_var)) + 1e-8
+        weight = jnp.exp(
+            -0.5 * jnp.square(jnp.log(xi) / (6.0 * trust_in_estimate))
+        )
+        x_average = decay_rate * x_average + weight * (
+            xi / jnp.power(params.step_size, 6.0)
+        )
+        time = decay_rate * time + weight
+        step_size = jnp.power(x_average / time, -1.0 / 6.0)
+        step_size = jnp.where(step_size < step_size_max,
+                              step_size, step_size_max)
+        params_new = params._replace(step_size=step_size)
+        adaptive_state = (time, x_average, step_size_max)
+        return state, params_new, adaptive_state, success, energy_change
+
+    # -- scan step for stages 1 & 2: returns trace row --
+    def step12(iteration_state, weight_and_key):
+        mask, rng_key = weight_and_key
+        state, params, adaptive_state, streaming_avg = iteration_state
+        state, params, adaptive_state, success, energy_change = predictor(
+            state, params, adaptive_state, rng_key,
+        )
+        x = ravel_pytree(state.position)[0]
+        streaming_avg = incremental_value_update(
+            expectation=jnp.array([x, jnp.square(x)]),
+            incremental_val=streaming_avg,
+            weight=mask * success * params.step_size,
+        )
+        trace_row = (params.step_size, params.L, jnp.square(energy_change))
+        return (state, params, adaptive_state, streaming_avg), trace_row
+
+    def run_steps12(xs, state, params):
+        carry, traces = jax.lax.scan(
+            step12,
+            init=(
+                state, params,
+                (0.0, 0.0, jnp.inf),
+                (0.0, jnp.array([jnp.zeros(dim), jnp.zeros(dim)])),
+            ),
+            xs=xs,
+        )
+        return carry, traces  # traces = (step_size[], L[], evar[])
+
+    # --- Stage 1 + 2 ---
+    n12 = num_steps1 + num_steps2
+    keys12 = jax.random.split(part1_key, n12 + 1)
+    keys12, final_key = keys12[:-1], keys12[-1]
+    mask = jnp.concatenate((jnp.zeros(num_steps1), jnp.ones(num_steps2)))
+
+    (state, params, _, (_, average)), traces12 = run_steps12(
+        xs=(mask, keys12), state=state, params=params,
+    )
+    all_ss = [traces12[0]]
+    all_L = [traces12[1]]
+    all_ev = [traces12[2]]
+
+    # Compute L and diagonal preconditioner
+    inverse_mass_matrix = params.inverse_mass_matrix
+    L = params.L
+    if num_steps2 > 1:
+        x_average, x_squared_average = average[0], average[1]
+        variances = x_squared_average - jnp.square(x_average)
+        L = jnp.sqrt(jnp.sum(variances))
+        if diagonal_preconditioning:
+            inverse_mass_matrix = variances
+            params = params._replace(inverse_mass_matrix=inverse_mass_matrix)
+            L = jnp.sqrt(dim)
+            # Readjust step size with new preconditioner
+            steps_extra = num_steps2_extra
+            if steps_extra > 0:
+                keys_extra = jax.random.split(final_key, steps_extra)
+                (state, params, _, _), traces_extra = run_steps12(
+                    xs=(jnp.ones(steps_extra), keys_extra),
+                    state=state, params=params,
+                )
+                all_ss.append(traces_extra[0])
+                all_L.append(traces_extra[1])
+                all_ev.append(traces_extra[2])
+
+    params = MCLMCAdaptationState(L, params.step_size, inverse_mass_matrix)
+
+    # --- Stage 3: L from ESS ---
+    if num_steps3 >= 2:
+        adaptation_L_keys = jax.random.split(part2_key, num_steps3)
+        built_kernel = mclmc_kernel(params.inverse_mass_matrix)
+
+        def step3(state, key):
+            next_state, info = built_kernel(
+                rng_key=key, state=state,
+                L=params.L, step_size=params.step_size,
+            )
+            trace_row = (params.step_size, params.L,
+                         jnp.square(info.energy_change))
+            return next_state, (next_state.position, trace_row)
+
+        state, (samples3, traces3) = jax.lax.scan(
+            f=step3, init=state, xs=adaptation_L_keys,
+        )
+        all_ss.append(traces3[0])
+        all_L.append(traces3[1])
+        all_ev.append(traces3[2])
+
+        flat_samples = jax.vmap(lambda x: ravel_pytree(x)[0])(samples3)
+        ess = bjx_ess(flat_samples[None, ...])
+        params = params._replace(
+            L=0.4 * params.step_size * jnp.mean(num_steps3 / ess),
+        )
+
+    trace = {
+        "step_size": jnp.concatenate(all_ss),
+        "L": jnp.concatenate(all_L),
+        "energy_var": jnp.concatenate(all_ev),
+        "stage_boundaries": (num_steps1,
+                             num_steps1 + num_steps2 + num_steps2_extra),
+    }
+    total_steps = num_steps1 + num_steps2 + num_steps2_extra + (
+        num_steps3 if num_steps3 >= 2 else 0)
+    return state, params, total_steps, trace
+
+
 def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
                thin=1):
     """Fit using the MCLMC sampler via BlackJAX.
@@ -280,7 +451,7 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
     def _run_one_tuning(idx):
         """Run a single tuning attempt; return a result dict."""
         try:
-            (state, params, _) = blackjax.mclmc_find_L_and_step_size(
+            (state, params, _, trace) = _mclmc_find_L_and_step_size_with_trace(
                 mclmc_kernel=kernel,
                 num_steps=tune_steps,
                 state=initial_state,
@@ -296,6 +467,7 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
                 "idx": idx, "L": L_val, "step_size": step_val,
                 "logdensity": ld_val, "valid": valid,
                 "state": state, "sampler_params": params,
+                "trace": trace,
             }
         except Exception as e:
             return {
@@ -1454,9 +1626,83 @@ def plot_mclmc_tuning(result, filestem):
     fig.tight_layout()
     outpath = filestem + "_mclmc_tuning.png"
     fig.savefig(outpath, dpi=150)
+    plt.show()
     plt.close(fig)
     print(f"Plot saved to {outpath}")
     return outpath
+
+
+def plot_mclmc_tuning_traces(result, filestem):
+    """Per-iteration trace plots for each MCLMC tuning run.
+
+    For every valid tuning run, produces a figure with three subplots
+    showing the within-run trajectory of step_size, L, and
+    energy_change^2 (energy variance proxy).  Vertical dashed lines
+    mark stage boundaries.  The selected run's title is highlighted
+    in red.
+
+    Parameters
+    ----------
+    result : _SamplesResult
+        Fitted MCLMC result with ``tuning_results`` attribute.
+    filestem : str
+        Output file prefix.
+
+    Returns
+    -------
+    list of str
+        Paths to the saved PNG files (one per valid run).
+    """
+    tuning = getattr(result, "tuning_results", None)
+    if tuning is None:
+        return []
+    selected_idx = getattr(result, "tuning_selected_idx", None)
+
+    paths = []
+    for r in tuning:
+        trace = r.get("trace")
+        if trace is None or not r["valid"]:
+            continue
+        i = r["idx"]
+        ss = np.array(trace["step_size"])
+        L_arr = np.array(trace["L"])
+        ev = np.array(trace["energy_var"])
+        b1, b2 = trace["stage_boundaries"]
+        iters = np.arange(1, len(ss) + 1)
+
+        fig, axes = plt.subplots(3, 1, figsize=(7, 6), sharex=True)
+        is_selected = (i == selected_idx)
+
+        for ax, data, label in zip(
+            axes,
+            [ss, L_arr, ev],
+            ["step_size", "L", "energy_change$^2$"],
+        ):
+            ax.plot(iters, data, linewidth=0.7,
+                    color="red" if is_selected else "steelblue")
+            ax.set_ylabel(label)
+            for bnd in (b1, b2):
+                if 0 < bnd < len(ss):
+                    ax.axvline(bnd, color="grey", linestyle="--",
+                               linewidth=0.8)
+
+        axes[-1].set_xlabel("Tuning iteration")
+        title = f"Tuning run {i + 1}"
+        if is_selected:
+            title += " (selected)"
+        axes[0].set_title(title,
+                          color="red" if is_selected else "black",
+                          fontweight="bold" if is_selected else "normal")
+        fig.tight_layout()
+        outpath = f"{filestem}_mclmc_tuning_run{i + 1}.png"
+        fig.savefig(outpath, dpi=150)
+        plt.show()
+        plt.close(fig)
+        paths.append(outpath)
+
+    if paths:
+        print(f"Tuning trace plots saved: {', '.join(paths)}")
+    return paths
 
 
 def _project_onto_submodel(mu, Z, w0=None):
@@ -1970,6 +2216,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         plot_autocorr(result, filestem, penalized_names=list(penalized_cols))
         if getattr(result, "tuning_results", None) is not None:
             plot_mclmc_tuning(result, filestem)
+            plot_mclmc_tuning_traces(result, filestem)
     plot_wevid(w, filestem)
 
     # --- 5. Projpred ---
