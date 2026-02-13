@@ -234,7 +234,7 @@ def _mclmc_find_L_and_step_size_with_trace(
     part1_key, part2_key = jax.random.split(rng_key, 2)
     num_steps1 = round(num_steps * frac_tune1)
     num_steps2 = round(num_steps * frac_tune2)
-    num_steps2_extra = (num_steps2 // 3) if diagonal_preconditioning else 0
+    num_steps2_extra = num_steps2 if diagonal_preconditioning else 0
     num_steps3 = round(num_steps * frac_tune3)
 
     decay_rate = (num_effective_samples - 1.0) / (num_effective_samples + 1.0)

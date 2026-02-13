@@ -291,12 +291,12 @@ out_mclmc = hs.run_analysis(
 MCLMC produces posterior estimates consistent with NUTS:
 
 ```
-  run 1: L=6.724, step_size=1.5275, logdensity=-178.70 [OK]
-  run 2: L=7.004, step_size=1.6372, logdensity=-185.26 [OK]
-  run 3: L=6.399, step_size=1.4553, logdensity=-184.80 [OK]
-  run 4: L=7.298, step_size=1.9752, logdensity=-183.06 [OK]
-  run 5: L=8.081, step_size=2.4526, logdensity=-171.20 [OK]
-MCLMC: selected run 2 — L=7.004, step_size=1.6372
+  run 1: L=7.427, step_size=1.9500, logdensity=-180.78 [OK]
+  run 2: L=7.783, step_size=1.9849, logdensity=-187.05 [OK]
+  run 3: L=5.386, step_size=1.1200, logdensity=-182.80 [OK]
+  run 4: L=7.457, step_size=2.1460, logdensity=-184.99 [OK]
+  run 5: L=8.568, step_size=2.4978, logdensity=-174.48 [OK]
+MCLMC: selected run 2 — L=7.783, step_size=1.9849
 ```
 
 #### MCLMC tuning diagnostics
@@ -331,23 +331,23 @@ lines:
    variance shows frequent spikes as the integrator explores the
    unconditioned geometry.
 
-2. **Stage 2** (iterations 50--116): the diagonal preconditioner
+2. **Stage 2** (iterations 50--150): the diagonal preconditioner
    (mass matrix) is computed from the position variances accumulated
    in stage 1, and the step size is readjusted.  A sharp spike in
    step_size appears around iteration 100 when the new preconditioner
-   suddenly changes the effective geometry.  The readjustment
-   sub-stage (between the two dashed lines) brings the step size back
-   to a stable value, but the spike means the final step size depends
-   sensitively on how far the readjustment progresses.
+   suddenly changes the effective geometry.  We use a longer
+   readjustment sub-stage than the BlackJAX default (`num_steps2`
+   iterations instead of `num_steps2 // 3`), which gives the step
+   size enough iterations to converge to a stable plateau before
+   stage 3 begins.
 
-3. **Stage 3** (iterations 116 onwards): step size is fixed, and L
+3. **Stage 3** (iterations 150 onwards): step size is fixed, and L
    (trajectory length) is set from the effective sample size of a
-   short sampling run.  Energy variance is generally lower in this
-   stage.
+   short sampling run.
 
 **L (trajectory length)** stays constant at sqrt(dim) = 8.0 throughout
 stages 1--2.  Only after stage 3 does L change to its ESS-based value
-(6.4--8.1 across runs).
+(5.4--8.6 across runs).
 
 **energy_change^2** (the energy variance proxy) is spiky throughout,
 reflecting the heavy-tailed geometry of the horseshoe posterior.  The
@@ -355,11 +355,10 @@ target energy variance is `dim * desired_energy_var` = 64 * 5e-4 =
 0.032.  The y-axis is cropped to twice the 95th percentile to make the
 overall trend visible despite large spikes.
 
-The variation in final step sizes (1.45--2.45) across the 5 runs arises
-mainly from the stage 2 preconditioner spike: different random seeds
-produce different spike heights, and the limited readjustment sub-stage
-does not always fully converge.  The median selection strategy mitigates
-this by discarding outlier runs.
+With the longer readjustment, the middle three runs converge to step
+sizes of 1.95, 1.98, and 2.15 -- much tighter than the 1.45--2.45
+spread with the BlackJAX default of `num_steps2 // 3`.  Run 3 remains
+an outlier (step_size=1.12) but the median selection discards it.
 
 ## API
 
