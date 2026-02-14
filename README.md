@@ -105,7 +105,7 @@ with no thinning.
 **Robust tuning**: MCLMC runs 5 tuning attempts and selects the median
 step size from valid runs.  This guards against occasional
 degenerate tuning results (NaN or extreme step sizes).  Use
-`plot_mclmc_tuning(result, filestem)` to inspect the tuning
+`plot_mclmc_tuning_traces(result, filestem)` to inspect the tuning
 diagnostics.
 
 For direct control over the arrays, the lower-level functions are also
@@ -299,26 +299,13 @@ MCLMC produces posterior estimates consistent with NUTS:
 MCLMC: selected run 2 — L=7.783, step_size=1.9849
 ```
 
-#### MCLMC tuning diagnostics
+#### MCLMC tuning traces
 
-The summary plot shows the final tuned values across the 5 tuning runs.
-The selected run (median step size) is marked with a red diamond:
+The tuning trace plot overlays all 5 runs, with the selected run
+(median step size) in red.  The lower panel uses a square root scale
+for energy_change^2.  Vertical dashed lines mark the stage boundaries.
 
-![MCLMC tuning summary](img/mclmc_tuning.png)
-
-#### Tuning trace plots
-
-The per-iteration trace plots show step_size and energy_change^2
-through BlackJAX's 3-stage tuning.  Vertical dashed lines mark
-stage boundaries.
-
-**Selected run (run 2):**
-
-![Tuning run 2 (selected)](img/mclmc_tuning_run2_selected.png)
-
-**Run 4 (larger final step size):**
-
-![Tuning run 4](img/mclmc_tuning_run4.png)
+![MCLMC tuning traces](img/mclmc_tuning_traces.png)
 
 #### Interpretation
 
@@ -327,9 +314,7 @@ lines:
 
 1. **Stage 1** (iterations 1--50): step-size adaptation without
    preconditioning.  The step size converges from its initial value
-   of sqrt(dim)/4 towards a stable value around 1.3--1.8.  Energy
-   variance shows frequent spikes as the integrator explores the
-   unconditioned geometry.
+   of sqrt(dim)/4 towards a stable value around 1.3--1.8.
 
 2. **Stage 2** (iterations 50--150): the diagonal preconditioner
    (mass matrix) is computed from the position variances accumulated
@@ -345,11 +330,9 @@ lines:
    (trajectory length) is set from the effective sample size of a
    short sampling run.
 
-**energy_change^2** (the energy variance proxy) is spiky throughout,
-reflecting the heavy-tailed geometry of the horseshoe posterior.  The
-target energy variance is `dim * desired_energy_var` = 64 * 5e-4 =
-0.032.  The y-axis is cropped to twice the 95th percentile to make the
-overall trend visible despite large spikes.
+**sqrt(energy_change^2)** is spiky throughout, reflecting the
+heavy-tailed geometry of the horseshoe posterior.  The target energy
+variance per dimension is `desired_energy_var` = 5e-4.
 
 With the longer readjustment, the middle three runs converge to step
 sizes of 1.95, 1.98, and 2.15 -- much tighter than the 1.45--2.45
@@ -377,8 +360,7 @@ an outlier (step_size=1.12) but the median selection discards it.
 | `plot_pair_diagnostic` | log(tau)--log(eta) scatter with divergences |
 | `plot_wevid` | Weight of evidence density plot |
 | `plot_forest` | Forest plot of penalized betas with 90% CIs |
-| `plot_mclmc_tuning` | MCLMC parallel tuning diagnostic plot |
-| `plot_mclmc_tuning_traces` | Per-run tuning trace plots (step_size, L, energy variance) |
+| `plot_mclmc_tuning_traces` | MCLMC tuning trace plots (step_size, energy variance) |
 | `plot_projpred` | KL divergence path from projpred search |
 
 ## References

@@ -115,7 +115,7 @@ def main():
         print(f"  beta[{j:2d}]: true={beta_true[j]:+6.2f}  "
               f"NUTS={beta_hat[j]:+6.3f}  MCLMC={beta_mclmc[j]:+6.3f}{flag}")
 
-    hs.plot_mclmc_tuning(mclmc_result, "hslogistic_mclmc")
+    hs.plot_mclmc_tuning_traces(mclmc_result, "hslogistic_mclmc")
 
     # ---- run_analysis: high-level DataFrame interface ----
     print("\n" + "=" * 60)

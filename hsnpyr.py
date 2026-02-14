@@ -33,7 +33,7 @@ __all__ = [
     "projpred_forward_search",
     "plot_learning_curve", "plot_pair_diagnostic",
     "plot_wevid", "plot_forest", "plot_pairs", "plot_trace", "plot_autocorr",
-    "plot_mclmc_tuning", "plot_mclmc_tuning_traces", "plot_projpred",
+    "plot_mclmc_tuning_traces", "plot_projpred",
     "sample_matched_controls",
     "run_analysis",
 ]
@@ -514,6 +514,12 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
           f"logdensity={selected['logdensity']:.2f} "
           f"({time.time() - t0:.1f}s)", flush=True)
 
+    # Free memory: strip heavy objects from non-selected tuning runs
+    for r in tuning_results:
+        if r["idx"] != selected_idx:
+            r.pop("state", None)
+            r.pop("sampler_params", None)
+
     # --- 4. Sample num_chains chains (Python-level loop) ---
     L_tuned = sampler_params.L
     step_tuned = sampler_params.step_size
@@ -539,7 +545,8 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
     print(f"MCLMC: JIT compilation done ({time.time() - t0:.1f}s)", flush=True)
 
     # --- Helper: sample one chain (no progress bar — used by threads) ---
-    def _sample_chain(chain_idx, step_fn_, run_key_, state0, n_samples):
+    def _sample_chain(chain_idx, step_fn_, run_key_, state0, n_samples,
+                      keep_every=1):
         """Return (sample_list, None) on success, (None, fail_step) on NaN."""
         chain_key = jax.random.fold_in(run_key_, chain_idx)
         state_cur = state0
@@ -555,7 +562,8 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
                     return None, i
             else:
                 n_nan = 0
-            sample_list.append(state_cur.position)
+            if (i + 1) % keep_every == 0:
+                sample_list.append(state_cur.position)
         return sample_list, None
 
     # Decide whether to run chains in parallel (threads).
@@ -579,7 +587,7 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
             with ThreadPoolExecutor(max_workers=n_workers) as pool:
                 for c in range(num_chains):
                     f = pool.submit(_sample_chain, c, step_fn, run_key,
-                                    state_after_tuning, num_samples)
+                                    state_after_tuning, num_samples, thin)
                     futures[f] = c
                 all_chain_samples = [None] * num_chains
                 n_done = 0
@@ -627,7 +635,8 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
                             break
                     else:
                         n_nan = 0
-                    sample_list.append(state_cur.position)
+                    if (i + 1) % thin == 0:
+                        sample_list.append(state_cur.position)
                     if (i + 1) % max(1, num_samples // 10) == 0:
                         pbar.set_postfix_str(f"logp={ld:.1f}")
                 else:
@@ -658,24 +667,27 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
     print(f"MCLMC: {num_chains} x {num_samples} samples in {elapsed:.1f}s "
           f"[step_size={float(step_size_cur):.4f}]", flush=True)
 
-    # --- 5. Thin and transform to constrained space ---
+    # --- 5. Transform to constrained space ---
+    n_retained = len(all_chain_samples[0])
     if thin > 1:
-        all_chain_samples = [ch[::thin] for ch in all_chain_samples]
-        n_retained = len(all_chain_samples[0])
-        print(f"MCLMC: thinned by {thin} — {n_retained} samples "
-              f"retained per chain", flush=True)
+        print(f"MCLMC: thinned by {thin} during sampling — {n_retained} "
+              f"samples retained per chain", flush=True)
 
     print("MCLMC: transforming to constrained space...", flush=True)
     t0 = time.time()
     chain_constrained = []
-    for chain_samples in all_chain_samples:
+    for ci in range(len(all_chain_samples)):
         unconstrained = jax.tree.map(
-            lambda *arrs: jnp.stack(arrs), *chain_samples)
+            lambda *arrs: jnp.stack(arrs), *all_chain_samples[ci])
+        all_chain_samples[ci] = None  # free raw samples immediately
         constrained = jax.vmap(postprocess_fn)(unconstrained)
+        del unconstrained
         chain_constrained.append(constrained)
+    del all_chain_samples
     # Stack to (num_chains, num_retained, ...) per site
     all_constrained = jax.tree.map(
         lambda *arrs: jnp.stack(arrs), *chain_constrained)
+    del chain_constrained
     print(f"MCLMC: done ({time.time() - t0:.1f}s)", flush=True)
 
     return _SamplesResult(all_constrained, num_chains=num_chains,
@@ -1633,13 +1645,12 @@ def plot_mclmc_tuning(result, filestem):
 
 
 def plot_mclmc_tuning_traces(result, filestem):
-    """Per-iteration trace plots for each MCLMC tuning run.
+    """Overlay trace plots for all MCLMC tuning runs.
 
-    For every valid tuning run, produces a figure with three subplots
-    showing the within-run trajectory of step_size, L, and
-    energy_change^2 (energy variance proxy).  Vertical dashed lines
-    mark stage boundaries.  The selected run's title is highlighted
-    in red.
+    A single figure with two subplots shows step_size and
+    energy_change^2 (sqrt scale) across tuning iterations.
+    All runs are overlaid; the selected run is drawn in red,
+    others in blue.  Vertical dashed lines mark stage boundaries.
 
     Parameters
     ----------
@@ -1650,62 +1661,62 @@ def plot_mclmc_tuning_traces(result, filestem):
 
     Returns
     -------
-    list of str
-        Paths to the saved PNG files (one per valid run).
+    str or None
+        Path to the saved PNG, or None if no tuning data.
     """
     tuning = getattr(result, "tuning_results", None)
     if tuning is None:
-        return []
+        return None
     selected_idx = getattr(result, "tuning_selected_idx", None)
 
-    paths = []
-    for r in tuning:
-        trace = r.get("trace")
-        if trace is None or not r["valid"]:
-            continue
+    # Collect runs that have traces
+    runs_with_traces = [r for r in tuning if r.get("trace") is not None]
+    if not runs_with_traces:
+        return None
+
+    fig, axes = plt.subplots(2, 1, figsize=(7, 4.5), sharex=True)
+
+    # Draw stage boundaries from first available trace
+    b1, b2 = runs_with_traces[0]["trace"]["stage_boundaries"]
+    n_iters = len(runs_with_traces[0]["trace"]["step_size"])
+    for ax in axes:
+        for bnd in (b1, b2):
+            if 0 < bnd < n_iters:
+                ax.axvline(bnd, color="grey", linestyle="--",
+                           linewidth=0.8)
+
+    # Plot non-selected runs first, then selected on top
+    for r in sorted(runs_with_traces,
+                    key=lambda r: r["idx"] == selected_idx):
+        trace = r["trace"]
         i = r["idx"]
+        is_selected = (i == selected_idx)
         ss = np.array(trace["step_size"])
         ev = np.array(trace["energy_var"])
-        b1, b2 = trace["stage_boundaries"]
         iters = np.arange(1, len(ss) + 1)
+        color = "red" if is_selected else "steelblue"
+        alpha = 1.0 if is_selected else 0.4
+        lw = 0.9 if is_selected else 0.5
+        zorder = 10 if is_selected else 1
+        label = f"run {i+1}" + (" (selected)" if is_selected else "")
 
-        fig, axes = plt.subplots(2, 1, figsize=(7, 4.5), sharex=True)
-        is_selected = (i == selected_idx)
+        axes[0].plot(iters, ss, linewidth=lw, color=color, alpha=alpha,
+                     zorder=zorder, label=label)
+        axes[1].plot(iters, np.sqrt(ev), linewidth=lw, color=color,
+                     alpha=alpha, zorder=zorder)
 
-        for ax, data, label in zip(
-            axes,
-            [ss, ev],
-            ["step_size", "energy_change$^2$"],
-        ):
-            ax.plot(iters, data, linewidth=0.7,
-                    color="red" if is_selected else "steelblue")
-            ax.set_ylabel(label)
-            for bnd in (b1, b2):
-                if 0 < bnd < len(ss):
-                    ax.axvline(bnd, color="grey", linestyle="--",
-                               linewidth=0.8)
-        # Crop energy_var y-axis to 95th percentile so the trend is visible
-        ev_upper = float(np.percentile(ev, 95)) * 2.0
-        if ev_upper > 0:
-            axes[1].set_ylim(0, ev_upper)
-
-        axes[-1].set_xlabel("Tuning iteration")
-        title = f"Tuning run {i + 1}"
-        if is_selected:
-            title += " (selected)"
-        axes[0].set_title(title,
-                          color="red" if is_selected else "black",
-                          fontweight="bold" if is_selected else "normal")
-        fig.tight_layout()
-        outpath = f"{filestem}_mclmc_tuning_run{i + 1}.png"
-        fig.savefig(outpath, dpi=150)
-        plt.show()
-        plt.close(fig)
-        paths.append(outpath)
-
-    if paths:
-        print(f"Tuning trace plots saved: {', '.join(paths)}")
-    return paths
+    axes[0].set_ylabel("step_size")
+    axes[1].set_ylabel(r"$\sqrt{\Delta E^2}$")
+    axes[-1].set_xlabel("Tuning iteration")
+    axes[0].legend(fontsize=7, ncol=3, loc="upper right")
+    axes[0].set_title("MCLMC tuning traces")
+    fig.tight_layout()
+    outpath = f"{filestem}_mclmc_tuning_traces.png"
+    fig.savefig(outpath, dpi=150)
+    plt.show()
+    plt.close(fig)
+    print(f"Plot saved to {outpath}")
+    return outpath
 
 
 def _project_onto_submodel(mu, Z, w0=None):
@@ -2169,7 +2180,6 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
     # --- 4. Tuning diagnostics (before posterior summaries) ---
     is_nuts = sampler == "nuts"
     if not is_nuts and getattr(result, "tuning_results", None) is not None:
-        plot_mclmc_tuning(result, filestem)
         plot_mclmc_tuning_traces(result, filestem)
 
     # --- 5. In-sample diagnostics ---
