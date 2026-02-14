@@ -308,9 +308,9 @@ The selected run (median step size) is marked with a red diamond:
 
 #### Tuning trace plots
 
-The per-iteration trace plots reveal the within-run dynamics of
-BlackJAX's 3-stage tuning algorithm.  Vertical dashed lines mark
-the stage boundaries.
+The per-iteration trace plots show step_size and energy_change^2
+through BlackJAX's 3-stage tuning.  Vertical dashed lines mark
+stage boundaries.
 
 **Selected run (run 2):**
 
@@ -344,10 +344,6 @@ lines:
 3. **Stage 3** (iterations 150 onwards): step size is fixed, and L
    (trajectory length) is set from the effective sample size of a
    short sampling run.
-
-**L (trajectory length)** stays constant at sqrt(dim) = 8.0 throughout
-stages 1--2.  Only after stage 3 does L change to its ESS-based value
-(5.4--8.6 across runs).
 
 **energy_change^2** (the energy variance proxy) is spiky throughout,
 reflecting the heavy-tailed geometry of the horseshoe posterior.  The

@@ -1665,18 +1665,17 @@ def plot_mclmc_tuning_traces(result, filestem):
             continue
         i = r["idx"]
         ss = np.array(trace["step_size"])
-        L_arr = np.array(trace["L"])
         ev = np.array(trace["energy_var"])
         b1, b2 = trace["stage_boundaries"]
         iters = np.arange(1, len(ss) + 1)
 
-        fig, axes = plt.subplots(3, 1, figsize=(7, 6), sharex=True)
+        fig, axes = plt.subplots(2, 1, figsize=(7, 4.5), sharex=True)
         is_selected = (i == selected_idx)
 
         for ax, data, label in zip(
             axes,
-            [ss, L_arr, ev],
-            ["step_size", "L", "energy_change$^2$"],
+            [ss, ev],
+            ["step_size", "energy_change$^2$"],
         ):
             ax.plot(iters, data, linewidth=0.7,
                     color="red" if is_selected else "steelblue")
@@ -1688,7 +1687,7 @@ def plot_mclmc_tuning_traces(result, filestem):
         # Crop energy_var y-axis to 95th percentile so the trend is visible
         ev_upper = float(np.percentile(ev, 95)) * 2.0
         if ev_upper > 0:
-            axes[2].set_ylim(0, ev_upper)
+            axes[1].set_ylim(0, ev_upper)
 
         axes[-1].set_xlabel("Tuning iteration")
         title = f"Tuning run {i + 1}"
@@ -2167,9 +2166,13 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
             "penalized_cols": list(penalized_cols),
         }
 
-    # --- 4. In-sample diagnostics ---
+    # --- 4. Tuning diagnostics (before posterior summaries) ---
     is_nuts = sampler == "nuts"
+    if not is_nuts and getattr(result, "tuning_results", None) is not None:
+        plot_mclmc_tuning(result, filestem)
+        plot_mclmc_tuning_traces(result, filestem)
 
+    # --- 5. In-sample diagnostics ---
     unpenalized_names = ["Intercept"] + list(unpenalized_cols)
     summary_report(result, filestem + "_summary.csv",
                    unpenalized_names=unpenalized_names,
@@ -2218,12 +2221,9 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         plot_pairs(result, filestem)
         plot_trace(result, filestem, penalized_names=list(penalized_cols))
         plot_autocorr(result, filestem, penalized_names=list(penalized_cols))
-        if getattr(result, "tuning_results", None) is not None:
-            plot_mclmc_tuning(result, filestem)
-            plot_mclmc_tuning_traces(result, filestem)
     plot_wevid(w, filestem)
 
-    # --- 5. Projpred ---
+    # --- 6. Projpred ---
     projpred_result = None
     if projpred_V is not None:
         print("\n" + "=" * 60)
@@ -2241,7 +2241,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
                            "kl_null": kl_null,
                            "selected_names": [penalized_cols[j] for j in selected]}
 
-    # --- 6. Return ---
+    # --- 7. Return ---
     return {
         "result": result,
         "N": N, "n_controls": n_controls, "n_cases": n_cases,
