@@ -983,15 +983,34 @@ def _get_available_memory_bytes():
     return None
 
 
-def _estimate_fold_memory_bytes(N_train, U, J, num_chains, num_samples):
-    """Rough estimate of memory needed per CV fold in bytes."""
-    n_params = U + J * 4 + 4  # beta_u, z/aux1/aux2_local per J, plus globals
-    samples_bytes = num_chains * num_samples * n_params * 4
+def _estimate_fold_memory_bytes(N_train, U, J, num_chains, num_retained,
+                                sampler="nuts"):
+    """Rough estimate of memory needed per CV fold in bytes.
+
+    Parameters
+    ----------
+    num_retained : int
+        Number of *retained* samples per chain (after thinning).
+    """
+    # Unconstrained params: beta_u(U) + aux1_global + aux2_global + caux + z(J) + aux1_local(J) + aux2_local(J)
+    n_params = U + 3 + 3 * J
+    # Retained samples (constrained) — stored in memory at end of fit
+    samples_bytes = num_chains * num_retained * n_params * 4
+    # Training data
     data_bytes = N_train * (J + U + 1) * 4
-    # 3x safety factor for JAX intermediates during sampling
-    model_bytes = int((samples_bytes + data_bytes) * 3)
-    # baseline for JAX/XLA runtime + JIT compilation cache per process
-    jax_baseline = 512 * 1024 * 1024  # 512 MB
+    # For MCLMC, tuning is the peak: 5 runs x scan arrays + stage 3 samples
+    # Peak during one tuning run: ~2 * num_steps3 * n_params * 4 (samples3 + flat_samples)
+    # but these are freed between runs now, so peak is one run at a time
+    if sampler == "mclmc":
+        tune_steps = max(1000, 3 * n_params)
+        num_steps3 = round(tune_steps * 0.1)
+        tuning_peak = 2 * num_steps3 * n_params * 4
+    else:
+        tuning_peak = 0
+    # 1.5x factor for JAX intermediates (transform, kernel state)
+    model_bytes = int((max(samples_bytes, tuning_peak) + data_bytes) * 1.5)
+    # JAX/XLA baseline per process
+    jax_baseline = 300 * 1024 * 1024  # 300 MB
     return model_bytes + jax_baseline
 
 
@@ -1076,11 +1095,17 @@ def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
     n_cpus = os.cpu_count() or 1
     n_workers = min(K, n_cpus)
 
+    # Resolve sampler-specific defaults for memory estimation
+    _ns = num_samples if num_samples is not None else (50_000 if sampler == "mclmc" else 1000)
+    _th = thin if thin is not None else (5 if sampler == "mclmc" else 1)
+    _num_retained = _ns // _th
+
     mem_avail = _get_available_memory_bytes()
     if mem_avail is not None:
         N_train = int(N * (K - 1) / K)
         mem_per_fold = _estimate_fold_memory_bytes(N_train, U, J,
-                                                   num_chains, num_samples)
+                                                   num_chains, _num_retained,
+                                                   sampler=sampler)
         mem_limit = max(1, int(mem_avail * 0.8) // mem_per_fold)
         n_workers = min(n_workers, mem_limit)
         print(f"Memory: {mem_avail / 1e9:.1f} GB available, "
