@@ -354,7 +354,9 @@ def _mclmc_find_L_and_step_size_with_trace(
         all_ev.append(traces3[2])
 
         flat_samples = jax.vmap(lambda x: ravel_pytree(x)[0])(samples3)
+        del samples3
         ess = bjx_ess(flat_samples[None, ...])
+        del flat_samples
         params = params._replace(
             L=0.4 * params.step_size * jnp.mean(num_steps3 / ess),
         )
@@ -420,6 +422,7 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
     )
     logdensity_fn = lambda position: -potential_fn_gen(position)
     initial_position = init_params.z
+    del init_params  # free initialization data; only position is needed
     n_params = sum(v.size for v in jax.tree.leaves(initial_position))
     print(f"MCLMC: {n_params} unconstrained parameters "
           f"({time.time() - t0:.1f}s)", flush=True)
@@ -432,6 +435,7 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
         logdensity_fn=logdensity_fn,
         rng_key=init_key,
     )
+    del initial_position, init_key  # no longer needed
     print(f"MCLMC: initial logdensity = {float(initial_state.logdensity):.2f} "
           f"({time.time() - t0:.1f}s)", flush=True)
 
@@ -476,8 +480,28 @@ def _fit_mclmc(model_kwargs, num_warmup, num_samples, num_chains, rng_seed,
                 "state": None, "sampler_params": None, "error": str(e),
             }
 
-    # Run sequentially — NumPyro's logdensity_fn is not thread-safe
-    tuning_results = [_run_one_tuning(i) for i in range(NUM_TUNE_RUNS)]
+    # Estimate memory per tuning run (rough upper bound)
+    # Stage 3 dominates: samples3 pytree ~ num_steps3 x dim, flat_samples ~ same
+    # Plus scan trace arrays, streaming averages, state, kernel intermediates
+    _num_steps3_est = round(tune_steps * 0.1)
+    _est_tune_bytes = (10 * n_params + 2 * _num_steps3_est * n_params) * 4
+
+    # Run sequentially with memory reporting and cleanup
+    import gc
+    tuning_results = []
+    for i in range(NUM_TUNE_RUNS):
+        gc.collect()
+        jax.clear_caches()
+        mem_avail = _get_available_memory_bytes()
+        if mem_avail is not None:
+            print(f"  tuning run {i+1}/{NUM_TUNE_RUNS}: "
+                  f"{mem_avail / 1e9:.1f} GB available, "
+                  f"~{_est_tune_bytes / 1e6:.0f} MB estimated per run",
+                  flush=True)
+        else:
+            print(f"  tuning run {i+1}/{NUM_TUNE_RUNS}: "
+                  f"memory info unavailable", flush=True)
+        tuning_results.append(_run_one_tuning(i))
 
     # Print summary of each tuning run
     for r in tuning_results:
