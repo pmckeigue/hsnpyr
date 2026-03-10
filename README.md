@@ -56,7 +56,7 @@ out = hs.run_analysis(
     unpenalized_cols=["age", "sex"],   # intercept is added automatically
     penalized_cols=["gene1", "gene2", ..., "gene500"],
     filestem="my_analysis",
-    p0=10,                             # prior guess: ~10 nonzero effects
+    fraction_nonzero=0.2,              # prior guess: 20% of covariates nonzero
     num_warmup=1000, num_samples=1000, num_chains=4,
     projpred_V=10,                     # select up to 10 variables
 )
@@ -68,7 +68,7 @@ cv_out = hs.run_analysis(
     unpenalized_cols=["age", "sex"],
     penalized_cols=["gene1", "gene2", ..., "gene500"],
     filestem="my_analysis",
-    p0=10,
+    fraction_nonzero=0.2,
     num_warmup=1000, num_samples=1000, num_chains=4,
     crossvalidate_=True,               # learning curve + 5-fold CV only
 )
@@ -153,7 +153,7 @@ out = hs.run_analysis(
     unpenalized_cols=[],
     penalized_cols=penalized_names,
     filestem="demo",
-    slab_scale=2.0, slab_df=4.0, p0=3,
+    slab_scale=2.0, slab_df=4.0, fraction_nonzero=0.2,
     num_warmup=500, num_samples=500, num_chains=2,
     rng_seed=0, projpred_V=5,
 )
@@ -161,22 +161,22 @@ out = hs.run_analysis(
 
 #### Posterior summary
 
-The summary CSV (`demo_summary.csv`) contains posterior summaries for: 
+The summary CSV (`demo_summary.csv`) contains posterior summaries for:
 
 * the global shrinkage parameter (tau)
-* the slab width (eta).  
-* the effective number of nonzero coefficients (m_eff)
+* the slab width (eta)
+* the effective fraction of nonzero coefficients (f_eff)
 * the intercept of the regression model
 * the coefficients for the top 5 penalized covariates by squared effect size with their
 shrinkage factors (kappa).
 
-A shrinkage factor of 1 indicates complete shrinkage: the coefficient will be close to zero.  With a regularized horseshoe prior, even the largest coefficients are regularized by a Gaussian prior with  mean zero and scale eta, so the shrinkage factor can never be close to zero unless the sample size is large enough for the likelihood to overwhelm this prior.  
+A shrinkage factor of 1 indicates complete shrinkage: the coefficient will be close to zero.  With a regularized horseshoe prior, even the largest coefficients are regularized by a Gaussian prior with mean zero and scale eta, so the shrinkage factor can never be close to zero unless the sample size is large enough for the likelihood to overwhelm this prior.
 
 | parameter | kappa | mean | q0.03 | q0.97 | n_eff | r_hat |
 |---|---:|---:|---:|---:|---:|---:|
 | tau | | 0.1270 | 0.0293 | 0.3431 | 341 | 1.001 |
 | eta | | 2.5491 | 1.3315 | 4.9484 | 512 | 1.003 |
-| m_eff | | 2.6120 | 1.4180 | 4.5643 | 533 | 1.002 |
+| f_eff | | 0.1306 | 0.0709 | 0.2282 | 533 | 1.002 |
 | Intercept | | -0.5393 | -0.9367 | -0.1590 | 1312 | 0.999 |
 | x0 | 0.3393 | 1.9396 | 1.3800 | 2.5644 | 870 | 1.000 |
 | x1 | 0.3675 | -1.7760 | -2.4235 | -1.1970 | 830 | 1.003 |
@@ -185,8 +185,8 @@ A shrinkage factor of 1 indicates complete shrinkage: the coefficient will be cl
 | x9 | 0.9239 | -0.1332 | -0.5503 | 0.0923 | 615 | 0.999 |
 
 The three true signals (x0, x1, x2) are recovered with the largest
-effect sizes.  The posterior mean of m_eff is close to the true
-number of nonzero coefficients (3).
+effect sizes.  The posterior mean of f_eff is close to the true
+fraction of nonzero coefficients (3/20 = 0.15).
 
 #### In-sample diagnostics
 
@@ -244,7 +244,7 @@ cv_out = hs.run_analysis(
     unpenalized_cols=[],
     penalized_cols=penalized_names,
     filestem="demo",
-    slab_scale=2.0, slab_df=4.0, p0=3,
+    slab_scale=2.0, slab_df=4.0, fraction_nonzero=0.2,
     num_warmup=500, num_samples=500, num_chains=2,
     rng_seed=0, crossvalidate_=True,
 )
@@ -282,7 +282,7 @@ out_mclmc = hs.run_analysis(
     unpenalized_cols=[],
     penalized_cols=penalized_names,
     filestem="demo_mclmc",
-    slab_scale=2.0, slab_df=4.0, p0=3,
+    slab_scale=2.0, slab_df=4.0, fraction_nonzero=0.2,
     num_warmup=500, num_samples=10_000, num_chains=2,
     rng_seed=0, sampler="mclmc",
 )

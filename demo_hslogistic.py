@@ -29,11 +29,12 @@ def main():
     logits = intercept + X @ beta_true
     y = np.random.binomial(1, 1.0 / (1.0 + np.exp(-logits))).astype(np.float32)
 
-    # Piironen & Vehtari recommended scale_global ~ p0 / (J - p0) / sqrt(N)
-    p0 = 3  # expected number of active covariates
-    scale_global = p0 / (J - p0) / np.sqrt(N)
+    # scale_global = f0/(1-f0) / sqrt(I), where I = N*p*(1-p) for logistic regression
+    fraction_nonzero = 0.2  # prior guess: 20% of covariates have nonzero effects
+    p_cases = float(y.mean())
+    scale_global = fraction_nonzero / (1 - fraction_nonzero) / np.sqrt(N * p_cases * (1 - p_cases))
 
-    print(f"N={N}, J={J}, p0={p0}, scale_global={scale_global:.4f}")
+    print(f"N={N}, J={J}, fraction_nonzero={fraction_nonzero}, scale_global={scale_global:.4f}")
     print(f"True nonzero betas: {beta_true[beta_true != 0]}")
     print(f"Observed y mean: {y.mean():.3f}")
     print()
@@ -63,12 +64,13 @@ def main():
     lambda_tilde_sq = (eta**2 * lambda_raw**2) / (eta**2 + tau**2 * lambda_raw**2)
     kappa = 1.0 / (1.0 + tau**2 * lambda_tilde_sq)        # shrinkage factors (S, J)
     m_eff = (1.0 - kappa).sum(axis=1)                      # (S,)
-    p0_true = int((beta_true != 0).sum())
-    print(f"\nTrue number of nonzero coefficients: {p0_true}")
-    print(f"Posterior m_eff:  mean={float(m_eff.mean()):.2f}  "
-          f"median={float(jnp.median(m_eff)):.2f}  "
-          f"90% CI=[{float(jnp.percentile(m_eff, 5)):.2f}, "
-          f"{float(jnp.percentile(m_eff, 95)):.2f}]")
+    f_eff = m_eff / J
+    f_true = float((beta_true != 0).sum()) / J
+    print(f"\nTrue fraction of nonzero coefficients: {f_true:.3f}")
+    print(f"Posterior f_eff:  mean={float(f_eff.mean()):.3f}  "
+          f"median={float(jnp.median(f_eff)):.3f}  "
+          f"90% CI=[{float(jnp.percentile(f_eff, 5)):.3f}, "
+          f"{float(jnp.percentile(f_eff, 95)):.3f}]")
 
     # Learning curve: info for discrimination vs training size
     train_sizes, info_values = hs.learning_curve(
@@ -132,7 +134,7 @@ def main():
         unpenalized_cols=[],
         penalized_cols=penalized_names,
         filestem="hslogistic_ra",
-        slab_scale=2.0, slab_df=4.0, p0=3,
+        slab_scale=2.0, slab_df=4.0, fraction_nonzero=0.2,
         num_warmup=500, num_samples=500, num_chains=2,
         rng_seed=0, projpred_V=5,
     )

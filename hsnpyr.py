@@ -1312,13 +1312,14 @@ def summary_report(mcmc, filepath, unpenalized_names=None,
     kappa_all = 1.0 / (1.0 + tau_ch ** 2 * lambda_tilde_sq)  # (chains, S, J)
     kappa_mean = np.array(kappa_all.reshape(-1, kappa_all.shape[-1]).mean(axis=0))
 
-    # m_eff
-    m_eff_chain = (1.0 - kappa_all).sum(axis=-1)  # (chains, samples)
+    # f_eff: effective fraction of nonzero coefficients
+    J_inf = kappa_all.shape[-1]
+    f_eff_chain = (1.0 - kappa_all).sum(axis=-1) / J_inf  # (chains, samples)
 
-    # tau, eta, m_eff
+    # tau, eta, f_eff
     rows = [_row("tau", chain_samples["tau"]),
             _row("eta", chain_samples["eta"]),
-            _row("m_eff", m_eff_chain)]
+            _row("f_eff", f_eff_chain)]
 
     # unpenalized betas
     beta_u = chain_samples.get("beta_u")
@@ -2029,7 +2030,8 @@ def sample_matched_controls(df, case_col, sex_col, age_col, R=1,
 
 
 def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
-                 slab_scale=2.0, slab_df=4.0, p0=None, scale_global=None,
+                 slab_scale=2.0, slab_df=4.0, fraction_nonzero=None, p0=None,
+                 scale_global=None,
                  standardize=True, sampler="nuts", crossvalidate_=False,
                  num_warmup=1000, num_samples=None, num_chains=4,
                  target_accept_prob=0.95, max_tree_depth=12,
@@ -2057,15 +2059,18 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         Regularizing slab scale.
     slab_df : float
         Slab inverse-gamma degrees of freedom.
+    fraction_nonzero : float or None
+        Prior guess for the fraction of penalized covariates with nonzero
+        effects (between 0 and 1).  Used with the Fisher information to set
+        ``scale_global`` via ``tau0 = f0/(1-f0) / sqrt(N * p * (1-p))``,
+        where f0 is ``fraction_nonzero`` and *p* is the case proportion.
+        If None, falls back to ``p0 / J`` if ``p0`` is given, otherwise 0.25.
     p0 : int or None
-        Prior guess for the number of penalized covariates with nonzero
-        effects.  Used to compute ``scale_global`` when it is not given
-        explicitly.  If None, defaults to ``max(1, J // 4)`` where J is
-        the number of penalized covariates.
+        Deprecated.  Prior guess for the *number* of nonzero effects.
+        Converted to ``fraction_nonzero = p0 / J`` internally.
     scale_global : float or None
-        Global shrinkage scale.  If None, estimated as
-        ``p0 / (J - p0) / sqrt(N * p * (1 - p))`` where *p* is the
-        proportion of cases.
+        Global shrinkage scale.  If None, computed from ``fraction_nonzero``
+        as described above.
     standardize : bool
         If True (default), centre and scale the penalized covariates to
         zero mean and unit variance before fitting.  Posterior summaries
@@ -2102,7 +2107,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
     dict
         When ``crossvalidate_=False`` (default): ``result``, ``N``,
         ``n_controls``, ``n_cases``, ``unpenalized_cols``,
-        ``penalized_cols``, ``beta_hat``, ``m_eff``, ``insample``,
+        ``penalized_cols``, ``beta_hat``, ``f_eff``, ``insample``,
         ``projpred`` (or None).
         When ``crossvalidate_=True``: ``N``, ``n_controls``,
         ``n_cases``, ``unpenalized_cols``, ``penalized_cols``, ``cv``.
@@ -2168,11 +2173,18 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
 
     # --- 2. Default scale_global ---
     if scale_global is None:
-        if p0 is None:
-            p0 = max(1, J // 4)
+        if fraction_nonzero is None:
+            if p0 is not None:
+                fraction_nonzero = p0 / J
+            else:
+                fraction_nonzero = 0.25
         p_cases = float(y.mean())
-        scale_global = p0 / (J - p0) / np.sqrt(N * p_cases * (1 - p_cases))
-        print(f"scale_global estimated: p0={p0}, scale_global={scale_global:.4f}")
+        # tau0 = f0/(1-f0) / sqrt(I), where I = N*p*(1-p) for logistic regression
+        # with standardized covariates (Piironen & Vehtari 2017; mrhevo theory)
+        scale_global = (fraction_nonzero / (1 - fraction_nonzero)
+                        / np.sqrt(N * p_cases * (1 - p_cases)))
+        print(f"scale_global estimated: fraction_nonzero={fraction_nonzero:.3f}, "
+              f"scale_global={scale_global:.4f}")
 
     n_cases = int(y.sum())
     n_controls = int(len(y) - n_cases)
@@ -2242,17 +2254,17 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
     beta_hat = np.array(samples["beta"].mean(axis=0))
     plot_forest(samples["beta"], list(penalized_cols), filestem)
 
-    # effective nonzero coefficients (m_eff)
+    # effective fraction of nonzero coefficients (f_eff)
     tau = samples["tau"][:, None]
     eta = samples["eta"][:, None]
     lambda_raw = samples["aux1_local"] * jnp.sqrt(samples["aux2_local"])
     lambda_tilde_sq = (eta**2 * lambda_raw**2) / (eta**2 + tau**2 * lambda_raw**2)
     kappa = 1.0 / (1.0 + tau**2 * lambda_tilde_sq)
-    m_eff = (1.0 - kappa).sum(axis=1)
-    print(f"\nPosterior m_eff:  mean={float(m_eff.mean()):.2f}  "
-          f"median={float(jnp.median(m_eff)):.2f}  "
-          f"90% CI=[{float(jnp.percentile(m_eff, 5)):.2f}, "
-          f"{float(jnp.percentile(m_eff, 95)):.2f}]")
+    f_eff = (1.0 - kappa).sum(axis=1) / J
+    print(f"\nPosterior f_eff:  mean={float(f_eff.mean()):.3f}  "
+          f"median={float(jnp.median(f_eff)):.3f}  "
+          f"90% CI=[{float(jnp.percentile(f_eff, 5)):.3f}, "
+          f"{float(jnp.percentile(f_eff, 95)):.3f}]")
 
     # in-sample predictions
     probs = predict(
@@ -2306,7 +2318,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         "N": N, "n_controls": n_controls, "n_cases": n_cases,
         "unpenalized_cols": ["Intercept"] + list(unpenalized_cols),
         "penalized_cols": list(penalized_cols),
-        "beta_hat": beta_hat, "m_eff": np.array(m_eff),
+        "beta_hat": beta_hat, "f_eff": np.array(f_eff),
         "insample": insample, "projpred": projpred_result,
     }
 
