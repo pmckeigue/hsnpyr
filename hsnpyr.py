@@ -1385,14 +1385,26 @@ def plot_pair_diagnostic(mcmc, filestem):
             if div.any():
                 log_tau_all = np.log(np.array(idata.posterior["tau"])).flatten()
                 log_eta_all = np.log(np.array(idata.posterior["eta"])).flatten()
-                target_ax = ax.ravel()[0] if hasattr(ax, "ravel") else ax
+                if hasattr(ax, "axes"):
+                    target_ax = np.array(ax.axes).ravel()[0]
+                elif hasattr(ax, "ravel"):
+                    target_ax = ax.ravel()[0]
+                else:
+                    target_ax = ax
                 target_ax.scatter(log_tau_all[div], log_eta_all[div],
                                   color="red", marker="o", s=25, zorder=5,
                                   label="divergence")
         except Exception:
             pass
     outpath = filestem + "_logtau_logeta.pdf"
-    fig = ax.get_figure() if hasattr(ax, "get_figure") else ax.ravel()[0].get_figure()
+    if hasattr(ax, "get_figure"):
+        fig = ax.get_figure()
+    elif hasattr(ax, "axes"):
+        fig = np.array(ax.axes).ravel()[0].get_figure()
+    elif hasattr(ax, "ravel"):
+        fig = ax.ravel()[0].get_figure()
+    else:
+        fig = plt.gcf()
     fig.set_size_inches(5, 4)
     fig.tight_layout()
     fig.savefig(outpath)
