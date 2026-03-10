@@ -82,7 +82,7 @@ Step 2 runs only the learning curve (K=2..5) and 5-fold cross-validation,
 skipping the full model fit.  It writes learning curve and CV weight of
 evidence plots, and returns the CV results.
 
-### Using MCLMC
+### Using MCLMC (experimental)
 
 The MCLMC sampler (via BlackJAX) is faster than NUTS for
 high-dimensional datasets.  Pass `sampler="mclmc"` to `fit()` or
