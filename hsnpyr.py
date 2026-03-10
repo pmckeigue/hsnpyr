@@ -1368,13 +1368,29 @@ def plot_pair_diagnostic(mcmc, filestem):
         Path to the saved PDF.
     """
     idata = az.from_numpyro(mcmc)
-    ax = az.plot_pair(
-        idata,
-        var_names=["log_tau", "log_eta"],
-        divergences=True,
-        divergences_kwargs={"color": "red", "marker": "o", "markersize": 5},
-        scatter_kwargs={"alpha": 0.5, "s": 16},
-    )
+    try:
+        # ArviZ < 0.18 API
+        ax = az.plot_pair(
+            idata,
+            var_names=["log_tau", "log_eta"],
+            divergences=True,
+            divergences_kwargs={"color": "red", "marker": "o", "markersize": 5},
+            scatter_kwargs={"alpha": 0.5, "s": 16},
+        )
+    except (ValueError, TypeError):
+        # ArviZ >= 0.18 removed divergences/scatter_kwargs; overlay manually
+        ax = az.plot_pair(idata, var_names=["log_tau", "log_eta"])
+        try:
+            div = np.array(idata.sample_stats["diverging"]).flatten()
+            if div.any():
+                log_tau_all = np.log(np.array(idata.posterior["tau"])).flatten()
+                log_eta_all = np.log(np.array(idata.posterior["eta"])).flatten()
+                target_ax = ax.ravel()[0] if hasattr(ax, "ravel") else ax
+                target_ax.scatter(log_tau_all[div], log_eta_all[div],
+                                  color="red", marker="o", s=25, zorder=5,
+                                  label="divergence")
+        except Exception:
+            pass
     outpath = filestem + "_logtau_logeta.pdf"
     fig = ax.get_figure() if hasattr(ax, "get_figure") else ax.ravel()[0].get_figure()
     fig.set_size_inches(5, 4)
