@@ -19,6 +19,7 @@ from numpyro.infer import MCMC, NUTS, Predictive
 from numpyro.diagnostics import effective_sample_size, split_gelman_rubin
 from numpyro.infer.util import initialize_model
 import blackjax
+from adjustText import adjust_text
 
 # Ensure tqdm can detect a terminal width in non-TTY environments
 # (cloud notebooks, piped output) so progress bars update in-place.
@@ -1378,6 +1379,7 @@ def plot_pair_diagnostic(mcmc, filestem):
             scatter_kwargs={"alpha": 0.5, "s": 16},
         )
     except (ValueError, TypeError):
+        plt.close("all")
         # ArviZ >= 0.18 removed divergences/scatter_kwargs; overlay manually
         ax = az.plot_pair(idata, var_names=["log_tau", "log_eta"])
         try:
@@ -1430,10 +1432,19 @@ def plot_wevid(w, filestem):
     str
         Path to the saved PDF.
     """
+    dx = w["x_stepsize"]
+    xseq = w["xseq"]
+    cdf_ctrls = np.cumsum(w["f_ctrls"]) * dx
+    cdf_ctrls /= cdf_ctrls[-1]
+    cdf_cases = np.cumsum(w["f_cases"]) * dx
+    cdf_cases /= cdf_cases[-1]
+    p1_ctrls = xseq[np.searchsorted(cdf_ctrls, 0.01)]
+    p99_cases = xseq[np.searchsorted(cdf_cases, 0.99)]
+
     fig, ax = plt.subplots(figsize=(5, 3.5))
-    ax.plot(w["xseq"], w["f_ctrls"], label="controls")
-    ax.plot(w["xseq"], w["f_cases"], label="cases")
-    ax.set_xlim(-10, 10)
+    ax.plot(xseq, w["f_ctrls"], label="controls")
+    ax.plot(xseq, w["f_cases"], label="cases")
+    ax.set_xlim(p1_ctrls - 0.5, p99_cases + 0.5)
     ax.set_xlabel("Weight of evidence (log units)")
     ax.set_ylabel("Density")
     ax.legend(fontsize=8)
@@ -1957,24 +1968,18 @@ def plot_projpred(selected, kl_path, kl_null, filestem, var_names=None):
     kl_values = [kl_null] + list(kl_path)
 
     fig, ax = plt.subplots(figsize=(5, 3.5))
-    ax.plot(steps, kl_values, "ko-", markersize=5)
-    # annotate each selected variable, alternating above/below to avoid overlap
+    (line,) = ax.plot(steps, kl_values, "ko-", markersize=5)
+    texts = []
     for i, j in enumerate(selected):
         label = var_names[j] if var_names is not None else f"X[{j}]"
-        if i % 2 == 0:
-            xytext = (6, 8)
-            va = "bottom"
-        else:
-            xytext = (6, -8)
-            va = "top"
-        ax.annotate(label, (i + 1, kl_path[i]),
-                    textcoords="offset points", xytext=xytext,
-                    fontsize=8, va=va)
+        texts.append(ax.text(i + 1, kl_path[i], label, fontsize=8))
     ax.set_xlabel("Number of selected covariates")
     ax.set_ylabel("KL divergence from reference model")
     ax.set_title("Projection predictive forward search")
     ax.set_xlim(-0.3, len(kl_path) + 0.3)
+    ax.set_ylim(bottom=0)
     fig.tight_layout()
+    adjust_text(texts, x=steps, y=kl_values, ax=ax, objects=[line])
     outpath = filestem + "_projpred.pdf"
     fig.savefig(outpath)
     plt.show()
