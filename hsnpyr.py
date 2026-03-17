@@ -1434,9 +1434,9 @@ def plot_wevid(w, filestem):
     """
     dx = w["x_stepsize"]
     xseq = w["xseq"]
-    cdf_ctrls = np.cumsum(w["f_ctrls"]) * dx
+    cdf_ctrls = np.cumsum(np.asarray(w["f_ctrls"])) * dx
     cdf_ctrls /= cdf_ctrls[-1]
-    cdf_cases = np.cumsum(w["f_cases"]) * dx
+    cdf_cases = np.cumsum(np.asarray(w["f_cases"])) * dx
     cdf_cases /= cdf_cases[-1]
     p1_ctrls = xseq[np.searchsorted(cdf_ctrls, 0.01)]
     p99_cases = xseq[np.searchsorted(cdf_cases, 0.99)]
