@@ -1196,10 +1196,14 @@ def learning_curve(X_u, X, y, K_values=(2, 3, 4, 5), slab_scale=1.0,
         Training-set sizes.
     info_values : ndarray
         Corresponding information-for-discrimination values (bits).
+    cv_results : list of dict
+        Full CV result dicts (one per K value), as returned by
+        :func:`crossvalidate`.
     """
     N = X.shape[0]
     train_sizes = []
     info_values = []
+    cv_results = []
     for K in K_values:
         n_train = int(N * (K - 1) / K)
         print(f"\n{'='*60}")
@@ -1216,7 +1220,8 @@ def learning_curve(X_u, X, y, K_values=(2, 3, 4, 5), slab_scale=1.0,
         )
         train_sizes.append(n_train)
         info_values.append(cv["info_discrim"])
-    return np.array(train_sizes), np.array(info_values)
+        cv_results.append(cv)
+    return np.array(train_sizes), np.array(info_values), cv_results
 
 
 def plot_learning_curve(train_sizes, info_values, filestem):
@@ -2224,7 +2229,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
 
     if crossvalidate_:
         # --- Cross-validation only: learning curve + K-fold CV ---
-        train_sizes, info_values = learning_curve(
+        train_sizes, info_values, cv_results = learning_curve(
             X_u, X, y, K_values=(2, 3, 4, 5),
             slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
             num_warmup=num_warmup, num_samples=num_samples,
@@ -2234,14 +2239,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         )
         plot_learning_curve(train_sizes, info_values, filestem)
 
-        cv_result = crossvalidate(
-            X_u, X, y, K=5,
-            slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
-            num_warmup=num_warmup, num_samples=num_samples,
-            num_chains=num_chains, target_accept_prob=target_accept_prob,
-            max_tree_depth=max_tree_depth, rng_seed=rng_seed,
-            sampler=sampler, thin=thin, max_workers=max_workers,
-        )
+        cv_result = cv_results[-1]  # reuse the K=5 result from the learning curve
         plot_wevid(cv_result["wevid"], filestem + "_cv")
 
         return {

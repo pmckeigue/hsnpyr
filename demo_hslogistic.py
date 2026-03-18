@@ -73,7 +73,7 @@ def main():
           f"{float(jnp.percentile(f_eff, 95)):.3f}]")
 
     # Learning curve: info for discrimination vs training size
-    train_sizes, info_values = hs.learning_curve(
+    train_sizes, info_values, cv_results = hs.learning_curve(
         X_u, X, y, K_values=(2, 3, 4, 5),
         slab_scale=2.0, slab_df=4.0, scale_global=scale_global,
         num_warmup=500, num_samples=500, num_chains=2, rng_seed=0,
@@ -83,6 +83,10 @@ def main():
 
     outpath2 = hs.plot_pair_diagnostic(mcmc, "hslogistic")
     print(f"Plot saved to {outpath2}")
+
+    cv_result = cv_results[-1]  # reuse the K=5 result from the learning curve
+    outpath1 = hs.plot_wevid(cv_result["wevid"], "hslogistic_cv")
+    print(f"Plot saved to {outpath1}")
 
     # Projection predictive forward search
     print("\n" + "=" * 60)
