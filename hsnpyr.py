@@ -1461,6 +1461,44 @@ def plot_wevid(w, filestem):
     return outpath
 
 
+def plot_probs(y, probs, filestem, xlabel="Predicted probabilities"):
+    """Histogram of posterior mean predicted probabilities for controls and cases.
+
+    Saves the figure to ``{filestem}_probs.pdf``.
+
+    Parameters
+    ----------
+    y : array-like of int
+        Binary outcome (0 = control, 1 = case).
+    probs : array-like of float
+        Posterior mean predicted probabilities.
+    filestem : str
+        Output file prefix.
+    xlabel : str
+        Label for the x-axis.  Defaults to ``"Predicted probabilities"``.
+
+    Returns
+    -------
+    str
+        Path to the saved PDF.
+    """
+    y = np.asarray(y)
+    probs = np.asarray(probs)
+    bins = np.linspace(0, 1, 41)
+    fig, ax = plt.subplots(figsize=(5, 3.5))
+    ax.hist(probs[y == 0], bins=bins, alpha=0.5, label="controls")
+    ax.hist(probs[y == 1], bins=bins, alpha=0.5, label="cases")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Count")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    outpath = filestem + "_probs.pdf"
+    fig.savefig(outpath)
+    plt.show()
+    plt.close()
+    return outpath
+
+
 def plot_forest(beta_samples, penalized_names, filestem):
     """Forest plot of penalized betas with 90% credible intervals.
 
@@ -2241,6 +2279,8 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
 
         cv_result = cv_results[-1]  # reuse the K=5 result from the learning curve
         plot_wevid(cv_result["wevid"], filestem + "_cv")
+        plot_probs(cv_result["y"], cv_result["probs"], filestem + "_cv",
+                   xlabel="Predicted probability (5-fold CV)")
 
         return {
             "N": N, "n_controls": n_controls, "n_cases": n_cases,

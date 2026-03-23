@@ -88,6 +88,10 @@ def main():
     outpath1 = hs.plot_wevid(cv_result["wevid"], "hslogistic_cv")
     print(f"Plot saved to {outpath1}")
 
+    outpath0 = hs.plot_probs(cv_result["y"], cv_result["probs"], "hslogistic_cv",
+                             xlabel="Predicted probabilities (5-fold CV)")
+    print(f"Plot saved to {outpath0}")
+
     # Projection predictive forward search
     print("\n" + "=" * 60)
     print("Projection predictive forward search")
