@@ -44,9 +44,35 @@ def hslogistic(X_u=None, X=None, y=None, slab_scale=None, slab_df=None, scale_gl
     """NumPyro model for logistic regression with regularized horseshoe prior.
 
     Unpenalized coefficients (beta_u) receive a wide Normal(0, 10) prior.
+
     Penalized coefficients (beta) receive a regularized horseshoe prior
-    controlled by ``scale_global`` (tau), ``slab_scale`` (eta), and
-    ``slab_df``.
+    controlled by ``scale_global`` (the prior scale for the global shrinkage
+    parameter, tau), and ``slab_scale`` and ``slab_df`` (the prior scale and
+    degrees of freedom for the inverse-gamma prior for the slab, eta)
+
+    Global shrinkage parameter, ``tau``, is sampled from a HalfCauchy(0,1)
+    distribution, scaled by ``scale_global``.
+
+    Local shrinkage parameters, ``lambda_tilde``, are given deterministically
+    by the relationship:
+    sqrt( (eta^2 * lambda_raw^2) / (eta^2 + tau^2 * lambda_raw^2) ), where
+    ``lambda_raw`` are the local shrinkage parameters of the original
+    horseshoe prior, sampled by a HalfCauchy(0,1) distribution, and
+    ``eta`` is the scale of the slab, with eta^2 sampled from an
+    InverseGamma(0.5 * slab_df, 0.5 * slab_df * slab_scale^2) distribution.
+
+    Piironen and Vehtari (2017) recommend setting ``scale_global`` by using
+    the following formula:
+    scale_global = (f0 / (1 - f0)) * (sigma / sqrt(N)), where
+    f0 is a prior guess for the proportion of non-zero coefficients, sigma^2
+    is an approximation of the noise variance, with the pseudo-variance for
+    binary classification taken as 1 / (p * (1 - p)), where p is the proportion
+    of positive cases, and N is the total number of observations.
+
+    HalfCauchy(0,1) distributions are sampled by multiplying two auxiliary
+    variables: a HalfNormal(0,1) scaled by the square root of an
+    InverseGamma(0.5, 0.5).
+
 
     Parameters
     ----------
