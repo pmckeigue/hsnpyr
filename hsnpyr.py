@@ -1195,7 +1195,7 @@ def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
             'info_discrim': info_discrim, 'log_score': lscore, 'wevid': w}
 
 
-def learning_curve(X_u, X, y, K_values=(2, 3, 4, 5), slab_scale=1.0,
+def learning_curve(X_u, X, y, K_values=(2, 3, 5), slab_scale=1.0,
                    slab_df=4.0, scale_global=1.0, num_warmup=1000,
                    num_samples=None, num_chains=4, target_accept_prob=0.95,
                    max_tree_depth=12, rng_seed=0, sampler="nuts", thin=None,
@@ -2204,7 +2204,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         are drawn randomly using ``rng_seed``.
     fit_learning_curve : bool
         If True (and ``crossvalidate_=True``), also run a learning
-        curve over K ∈ {2, 3, 4, 5}.  If the CV run above used a K
+        curve over K ∈ {2, 3, 5}.  If the CV run above used a K
         that is in this set, that result is reused as-is rather than
         re-running sampling.
     num_warmup : int
@@ -2341,7 +2341,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
 
         if fit_learning_curve:
             # Run learning curve for the K values not already computed
-            lc_all_K = (2, 3, 4, 5)
+            lc_all_K = (2, 3, 5)
             remaining_K = tuple(k for k in lc_all_K if k != cv_K)
             N_data = X.shape[0]
             if remaining_K:
