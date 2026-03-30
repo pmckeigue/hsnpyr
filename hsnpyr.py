@@ -1069,7 +1069,8 @@ def _cv_fold_worker(fold_args):
 def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
                   scale_global=1.0, num_warmup=1000, num_samples=None,
                   num_chains=4, target_accept_prob=0.95, max_tree_depth=12,
-                  rng_seed=0, sampler="nuts", thin=None, max_workers=None):
+                  rng_seed=0, sampler="nuts", thin=None, max_workers=None,
+                  folds=None):
     """K-fold cross-validation with automatic parallelisation.
 
     Fits the model on K-1 folds and predicts the held-out fold,
@@ -1081,7 +1082,7 @@ def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
     X_u, X, y : array-like
         Design matrices and outcome (see :func:`fit`).
     K : int
-        Number of folds.
+        Number of folds.  Ignored when ``folds`` is provided.
     slab_scale, slab_df, scale_global : float
         Horseshoe prior parameters.
     num_warmup, num_samples, num_chains : int
@@ -1092,7 +1093,8 @@ def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
     max_tree_depth : int
         NUTS maximum tree depth.
     rng_seed : int
-        Random seed (incremented per fold).
+        Random seed (incremented per fold).  Only used when ``folds``
+        is None.
     sampler : {"nuts", "mclmc"}
         Sampling algorithm.
     thin : int or None
@@ -1100,6 +1102,12 @@ def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
     max_workers : int or None
         Maximum parallel fold workers.  None uses all available CPUs
         subject to a memory-based limit.
+    folds : list of array-like or None
+        Pre-computed fold assignment: a list of K arrays, each
+        containing the integer row indices of one held-out fold.
+        When provided, ``K`` and ``rng_seed`` are ignored for fold
+        construction.  Pass the same list to other models to ensure
+        identical train/test splits.
 
     Returns
     -------
@@ -1113,10 +1121,14 @@ def crossvalidate(X_u, X, y, K=5, slab_scale=1.0, slab_df=4.0,
     N = X.shape[0]
     U = X_u.shape[1]
     J = X.shape[1]
-    indices = np.arange(N)
-    rng = np.random.RandomState(rng_seed)
-    rng.shuffle(indices)
-    folds = np.array_split(indices, K)
+    if folds is not None:
+        folds = [np.asarray(f) for f in folds]
+        K = len(folds)
+    else:
+        indices = np.arange(N)
+        rng = np.random.RandomState(rng_seed)
+        rng.shuffle(indices)
+        folds = np.array_split(indices, K)
 
     # determine number of parallel workers
     n_cpus = os.cpu_count() or 1
@@ -2135,6 +2147,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
                  slab_scale=2.0, slab_df=4.0, fraction_nonzero=None, p0=None,
                  scale_global=None,
                  standardize=True, sampler="nuts", crossvalidate_=False,
+                 cv_folds=None, fit_learning_curve=False,
                  num_warmup=1000, num_samples=None, num_chains=4,
                  target_accept_prob=0.95, max_tree_depth=12,
                  rng_seed=0, thin=None, projpred_V=None, max_workers=None):
@@ -2180,9 +2193,20 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
     sampler : {"nuts", "mclmc"}
         Sampling algorithm.
     crossvalidate_ : bool
-        If True, run only cross-validation: a learning curve (K=2..5)
-        and 5-fold CV.  The full model fit, posterior summaries, and
-        projpred are skipped.
+        If True, run K-fold cross-validation.  The full model fit,
+        posterior summaries, and projpred are skipped.  The number of
+        folds is 5 by default, or inferred from ``cv_folds`` if given.
+    cv_folds : list of array-like or None
+        Pre-computed fold assignment passed directly to
+        :func:`crossvalidate`.  A list of K arrays of row indices (one
+        per held-out fold).  When provided the same splits can be
+        reused by other models for a fair comparison.  If None, folds
+        are drawn randomly using ``rng_seed``.
+    fit_learning_curve : bool
+        If True (and ``crossvalidate_=True``), also run a learning
+        curve over K ∈ {2, 3, 4, 5}.  If the CV run above used a K
+        that is in this set, that result is reused as-is rather than
+        re-running sampling.
     num_warmup : int
         Warmup iterations per chain.
     num_samples : int or None
@@ -2212,7 +2236,8 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         ``penalized_cols``, ``beta_hat``, ``f_eff``, ``insample``,
         ``projpred`` (or None).
         When ``crossvalidate_=True``: ``N``, ``n_controls``,
-        ``n_cases``, ``unpenalized_cols``, ``penalized_cols``, ``cv``.
+        ``n_cases``, ``unpenalized_cols``, ``penalized_cols``, ``cv``
+        (and ``learning_curve`` when ``fit_learning_curve=True``).
     """
     # --- 1. Extract arrays ---
     used_cols = [y_col] + list(unpenalized_cols) + list(penalized_cols)
@@ -2292,28 +2317,66 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
     n_controls = int(len(y) - n_cases)
 
     if crossvalidate_:
-        # --- Cross-validation only: learning curve + K-fold CV ---
-        train_sizes, info_values, cv_results = learning_curve(
-            X_u, X, y, K_values=(2, 3, 4, 5),
+        # --- K-fold CV ---
+        cv_K = len(cv_folds) if cv_folds is not None else 5
+        cv_result = crossvalidate(
+            X_u, X, y, K=cv_K,
             slab_scale=slab_scale, slab_df=slab_df, scale_global=scale_global,
             num_warmup=num_warmup, num_samples=num_samples,
             num_chains=num_chains, target_accept_prob=target_accept_prob,
             max_tree_depth=max_tree_depth, rng_seed=rng_seed,
             sampler=sampler, thin=thin, max_workers=max_workers,
+            folds=cv_folds,
         )
-        plot_learning_curve(train_sizes, info_values, filestem)
-
-        cv_result = cv_results[-1]  # reuse the K=5 result from the learning curve
         plot_wevid(cv_result["wevid"], filestem + "_cv")
         plot_probs(cv_result["y"], cv_result["probs"], filestem + "_cv",
-                   xlabel="Predicted probability (5-fold CV)")
+                   xlabel=f"Predicted probability ({cv_K}-fold CV)")
 
-        return {
+        out = {
             "N": N, "n_controls": n_controls, "n_cases": n_cases,
             "unpenalized_cols": ["Intercept"] + list(unpenalized_cols),
             "penalized_cols": list(penalized_cols),
             "cv": cv_result,
         }
+
+        if fit_learning_curve:
+            # Run learning curve for the K values not already computed
+            lc_all_K = (2, 3, 4, 5)
+            remaining_K = tuple(k for k in lc_all_K if k != cv_K)
+            N_data = X.shape[0]
+            if remaining_K:
+                lc_train_sizes, lc_info_values, lc_cv_results = learning_curve(
+                    X_u, X, y, K_values=remaining_K,
+                    slab_scale=slab_scale, slab_df=slab_df,
+                    scale_global=scale_global, num_warmup=num_warmup,
+                    num_samples=num_samples, num_chains=num_chains,
+                    target_accept_prob=target_accept_prob,
+                    max_tree_depth=max_tree_depth, rng_seed=rng_seed,
+                    sampler=sampler, thin=thin, max_workers=max_workers,
+                )
+                lc_train_sizes = list(lc_train_sizes)
+                lc_info_values = list(lc_info_values)
+            else:
+                lc_train_sizes, lc_info_values, lc_cv_results = [], [], []
+
+            # Insert the already-computed CV result at the right sorted position
+            if cv_K in lc_all_K:
+                cv_train_size = int(N_data * (cv_K - 1) / cv_K)
+                insert_at = sum(1 for k in remaining_K if k < cv_K)
+                lc_train_sizes.insert(insert_at, cv_train_size)
+                lc_info_values.insert(insert_at, cv_result["info_discrim"])
+                lc_cv_results.insert(insert_at, cv_result)
+
+            train_sizes = np.array(lc_train_sizes)
+            info_values = np.array(lc_info_values)
+            plot_learning_curve(train_sizes, info_values, filestem)
+            out["learning_curve"] = {
+                "train_sizes": train_sizes,
+                "info_values": info_values,
+                "cv_results": lc_cv_results,
+            }
+
+        return out
 
     # --- 3. Fit full model ---
     try:
