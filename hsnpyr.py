@@ -30,7 +30,7 @@ __all__ = [
     "cstatistic", "log_score",
     "Wdensities", "wevid", "get_info_discrim",
     "recalibrate_probs",
-    "learning_curve", "summary_report",
+    "learning_curve", "posterior_summary",
     "projpred_forward_search",
     "plot_learning_curve", "plot_pair_diagnostic",
     "plot_wevid", "plot_forest", "plot_pairs", "plot_trace", "plot_autocorr",
@@ -1313,24 +1313,29 @@ def plot_learning_curve(train_sizes, info_values, filestem):
     return outpath
 
 
-def summary_report(mcmc, filepath, unpenalized_names=None,
-                    penalized_names=None):
-    """Posterior summary table saved to CSV.
+def posterior_summary(mcmc, filepath=None, unpenalized_names=None,
+                      penalized_names=None):
+    """Posterior summary table.
 
     Parameters
     ----------
     mcmc : MCMC or _SamplesResult
         Fitted result (NUTS or MCLMC) supporting ``get_samples(group_by_chain=True)``.
-    filepath : str
-        Path for the output CSV.
+    filepath : str or None
+        Path for the output CSV.  If None (default), no file is written.
     unpenalized_names : list of str, optional
         Display names for beta_u parameters (length U).  When provided,
         ``beta_u[0]`` is labelled ``unpenalized_names[0]`` (typically
         ``"Intercept"``), etc.  Default ``None`` keeps ``beta_u[i]``.
     penalized_names : list of str, optional
-        Display names for penalized covariates (length J).  When
-        provided, the top-5 penalized betas (by squared posterior mean)
-        are appended to the table using these names.
+        Display names for penalized covariates (length J).  All
+        penalized betas are included in the returned DataFrame; the
+        display shows only the top 5 by squared posterior mean.
+
+    Returns
+    -------
+    pd.DataFrame
+        Full summary table including all penalized covariates.
     """
     chain_samples = mcmc.get_samples(group_by_chain=True)
 
@@ -1374,24 +1379,32 @@ def summary_report(mcmc, filepath, unpenalized_names=None,
             label = unpenalized_names[i] if unpenalized_names is not None else f"beta_u[{i}]"
             rows.append(_row(label, beta_u[..., i]))
 
-    # top-5 penalized covariates by squared posterior mean
+    # all penalized covariates, sorted by descending squared posterior mean
     beta_chain = chain_samples.get("beta")      # (chains, samples, J)
-    if penalized_names is not None and beta_chain is not None:
+    if beta_chain is not None:
         beta_mean = np.array(beta_chain.reshape(-1, beta_chain.shape[-1]).mean(axis=0))
-        n_top = min(5, len(penalized_names))
-        top_idx = np.argsort(beta_mean ** 2)[-n_top:][::-1]
-        for idx in top_idx:
-            rows.append(_row(penalized_names[idx], beta_chain[..., idx],
-                             kappa_val=round(float(kappa_mean[idx]), 4)))
+        sorted_idx = np.argsort(beta_mean ** 2)[::-1]
+        penalized_rows = []
+        for idx in sorted_idx:
+            label = penalized_names[idx] if penalized_names is not None else f"beta[{idx}]"
+            penalized_rows.append(_row(label, beta_chain[..., idx],
+                                       kappa_val=round(float(kappa_mean[idx]), 4)))
 
-    df = pd.DataFrame(rows)
-    df.to_csv(filepath, index=False, float_format="%.4f")
+    # Display: header rows + top-5 penalized
+    display_df = pd.DataFrame(rows + penalized_rows[:5])
     try:
         from IPython.display import display
-        display(df)
+        display(display_df)
     except ImportError:
-        print(df.to_string(index=False))
-    print(f"Summary saved to {filepath}")
+        print(display_df.to_string(index=False))
+
+    # Create full summary DataFrame to save and return
+    df = pd.DataFrame(rows + penalized_rows)
+
+    if filepath is not None:
+        df.to_csv(filepath, index=False, float_format="%.4f")
+        print(f"Summary saved to {filepath}")
+
     return df
 
 
@@ -2406,7 +2419,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
 
     # --- 5. In-sample diagnostics ---
     unpenalized_names = ["Intercept"] + list(unpenalized_cols)
-    summary_report(result, filestem + "_summary.csv",
+    posterior_summary(result, filestem + "_summary.csv",
                    unpenalized_names=unpenalized_names,
                    penalized_names=list(penalized_cols))
 

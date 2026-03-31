@@ -46,7 +46,7 @@ def main():
     )
 
     # summary report for full-dataset fit
-    hs.summary_report(mcmc, "hslogistic_summary.csv")
+    hs.posterior_summary(mcmc, "hslogistic_summary.csv")
 
     # posterior mean of penalized betas
     beta_samples = mcmc.get_samples()["beta"]
@@ -116,7 +116,7 @@ def main():
         rng_seed=0, sampler="mclmc",
     )
 
-    hs.summary_report(mclmc_result, "hslogistic_mclmc_summary.csv")
+    hs.posterior_summary(mclmc_result, "hslogistic_mclmc_summary.csv")
 
     beta_mclmc = mclmc_result.get_samples()["beta"].mean(axis=0)
     print("\nMCLMC vs NUTS penalized betas:")
