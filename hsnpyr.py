@@ -58,7 +58,8 @@ def hslogistic(X_u=None, X=None, y=None, slab_scale=None, slab_df=None, scale_gl
     sqrt( (eta^2 * lambda_raw^2) / (eta^2 + tau^2 * lambda_raw^2) ), where
     ``lambda_raw`` are the local shrinkage parameters of the original
     horseshoe prior, sampled by a HalfCauchy(0,1) distribution, and
-    ``eta`` is the scale of the slab, with eta^2 sampled from an
+    ``eta`` is the scale of the Gaussian slab (denoted by c in Piironen and
+    Vehtari (2017) eq 2.8 onwards), with eta^2 sampled from an
     InverseGamma(0.5 * slab_df, 0.5 * slab_df * slab_scale^2) distribution.
 
     Piironen and Vehtari (2017) recommend setting ``scale_global`` by using
@@ -101,8 +102,8 @@ def hslogistic(X_u=None, X=None, y=None, slab_scale=None, slab_df=None, scale_gl
     aux1_global =  npyr.sample("aux1_global", dist.HalfNormal(1.0))
     aux2_global = npyr.sample("aux2_global", dist.InverseGamma(0.5 * nu_global, 0.5 * nu_global))
     τ = npyr.deterministic("tau", aux1_global * jnp.sqrt(aux2_global) * scale_global)
-    caux = npyr.sample("caux", dist.InverseGamma(0.5 * slab_df, 0.5 * slab_df))
-    eta = npyr.deterministic("eta", slab_scale * jnp.sqrt(caux))
+    aux_eta = npyr.sample("aux_eta", dist.InverseGamma(0.5 * slab_df, 0.5 * slab_df))
+    eta = npyr.deterministic("eta", slab_scale * jnp.sqrt(aux_eta))
     log_τ = npyr.deterministic("log_tau", jnp.log(τ))
     log_eta = npyr.deterministic("log_eta", jnp.log(eta))
     with npyr.plate("J penalized covariates", J):
@@ -1019,7 +1020,7 @@ def _estimate_fold_memory_bytes(N_train, U, J, num_chains, num_retained,
     num_retained : int
         Number of *retained* samples per chain (after thinning).
     """
-    # Unconstrained params: beta_u(U) + aux1_global + aux2_global + caux + z(J) + aux1_local(J) + aux2_local(J)
+    # Unconstrained params: beta_u(U) + aux1_global + aux2_global + aux_eta + z(J) + aux1_local(J) + aux2_local(J)
     n_params = U + 3 + 3 * J
     # Retained samples (constrained) — stored in memory at end of fit
     samples_bytes = num_chains * num_retained * n_params * 4
