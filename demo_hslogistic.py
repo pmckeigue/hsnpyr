@@ -36,7 +36,7 @@ def main():
 
     print(f"N={N}, J={J}, fraction_nonzero={fraction_nonzero}, scale_global={scale_global:.4f}")
     print(f"True nonzero betas: {beta_true[beta_true != 0]}")
-    print(f"Observed y mean: {y.mean():.3f}")
+    print(f"Observed y mean: {p_cases:.3f}")
     print()
 
     mcmc = hs.fit(
@@ -46,7 +46,7 @@ def main():
     )
 
     # summary report for full-dataset fit
-    hs.posterior_summary(mcmc, "hslogistic_summary.csv")
+    hs.posterior_summary(mcmc, N, p_cases, filepath="hslogistic_summary.csv")
 
     # posterior mean of penalized betas
     beta_samples = mcmc.get_samples()["beta"]
@@ -62,7 +62,7 @@ def main():
     eta = samples["eta"][:, None]                          # (S, 1)
     lambda_raw = samples["aux1_local"] * jnp.sqrt(samples["aux2_local"])  # (S, J)
     lambda_tilde_sq = (eta**2 * lambda_raw**2) / (eta**2 + tau**2 * lambda_raw**2)
-    kappa = 1.0 / (1.0 + tau**2 * lambda_tilde_sq)        # shrinkage factors (S, J)
+    kappa = 1.0 / (1.0 + tau**2 * lambda_tilde_sq * N * p_cases * (1 - p_cases))  # shrinkage factors (S, J)
     m_eff = (1.0 - kappa).sum(axis=1)                      # (S,)
     f_eff = m_eff / J
     f_true = float((beta_true != 0).sum()) / J
@@ -116,7 +116,7 @@ def main():
         rng_seed=0, sampler="mclmc",
     )
 
-    hs.posterior_summary(mclmc_result, "hslogistic_mclmc_summary.csv")
+    hs.posterior_summary(mclmc_result, N, p_cases, filepath="hslogistic_mclmc_summary.csv")
 
     beta_mclmc = mclmc_result.get_samples()["beta"].mean(axis=0)
     print("\nMCLMC vs NUTS penalized betas:")

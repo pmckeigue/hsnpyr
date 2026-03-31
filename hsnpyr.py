@@ -1313,7 +1313,7 @@ def plot_learning_curve(train_sizes, info_values, filestem):
     return outpath
 
 
-def posterior_summary(mcmc, filepath=None, unpenalized_names=None,
+def posterior_summary(mcmc, N, p, filepath=None, unpenalized_names=None,
                       penalized_names=None):
     """Posterior summary table.
 
@@ -1321,6 +1321,10 @@ def posterior_summary(mcmc, filepath=None, unpenalized_names=None,
     ----------
     mcmc : MCMC or _SamplesResult
         Fitted result (NUTS or MCLMC) supporting ``get_samples(group_by_chain=True)``.
+    N : int
+        Number of observations.
+    p : float
+        Proportion of cases (y == 1).
     filepath : str or None
         Path for the output CSV.  If None (default), no file is written.
     unpenalized_names : list of str, optional
@@ -1359,7 +1363,7 @@ def posterior_summary(mcmc, filepath=None, unpenalized_names=None,
                   * jnp.sqrt(chain_samples["aux2_local"]))
     lambda_tilde_sq = ((eta_ch ** 2 * lambda_raw ** 2)
                        / (eta_ch ** 2 + tau_ch ** 2 * lambda_raw ** 2))
-    kappa_all = 1.0 / (1.0 + tau_ch ** 2 * lambda_tilde_sq)  # (chains, S, J)
+    kappa_all = 1.0 / (1.0 + tau_ch ** 2 * lambda_tilde_sq * N * p * (1 - p))  # (chains, S, J)
     kappa_mean = np.array(kappa_all.reshape(-1, kappa_all.shape[-1]).mean(axis=0))
 
     # f_eff: effective fraction of nonzero coefficients
@@ -1602,7 +1606,7 @@ def plot_forest(beta_samples, penalized_names, filestem):
     return outpath
 
 
-def _m_eff_from_chain_samples(chain_samples):
+def _m_eff_from_chain_samples(chain_samples, N, p):
     """Compute m_eff (effective nonzero coefficients) per chain-sample.
 
     Parameters
@@ -1610,6 +1614,10 @@ def _m_eff_from_chain_samples(chain_samples):
     chain_samples : dict
         Posterior samples with chain dimension, as returned by
         ``result.get_samples(group_by_chain=True)``.
+    N : int
+        Number of observations.
+    p : float
+        Proportion of cases (y == 1).
 
     Returns
     -------
@@ -1621,11 +1629,11 @@ def _m_eff_from_chain_samples(chain_samples):
                * jnp.sqrt(chain_samples["aux2_local"]))
     lam_sq = ((eta_ch ** 2 * lam_raw ** 2)
               / (eta_ch ** 2 + tau_ch ** 2 * lam_raw ** 2))
-    kappa = 1.0 / (1.0 + tau_ch ** 2 * lam_sq)
+    kappa = 1.0 / (1.0 + tau_ch ** 2 * lam_sq * N * p * (1 - p))
     return (1.0 - kappa).sum(axis=-1)
 
 
-def plot_pairs(result, filestem):
+def plot_pairs(result, N, p, filestem):
     """Pairs plot of tau, eta, and m_eff posterior samples.
 
     Saves the figure to ``{filestem}_pairs.pdf``.
@@ -1634,6 +1642,10 @@ def plot_pairs(result, filestem):
     ----------
     result : MCMC or _SamplesResult
         Fitted model.
+    N : int
+        Number of observations.
+    p : float
+        Proportion of cases (y == 1).
     filestem : str
         Output file prefix.
 
@@ -1643,7 +1655,7 @@ def plot_pairs(result, filestem):
         Path to the saved PDF.
     """
     chain_samples = result.get_samples(group_by_chain=True)
-    m_eff_ch = _m_eff_from_chain_samples(chain_samples)
+    m_eff_ch = _m_eff_from_chain_samples(chain_samples, N, p)
 
     idata = az.from_dict(posterior={
         "tau": np.array(chain_samples["tau"]),
@@ -1666,7 +1678,7 @@ def plot_pairs(result, filestem):
     return outpath
 
 
-def plot_trace(result, filestem, penalized_names=None):
+def plot_trace(result, N, p, filestem, penalized_names=None):
     """Trace plot of tau, eta, m_eff and top 3 penalized coefficients.
 
     Each chain is plotted in a distinct colour.  Saves the figure to
@@ -1676,6 +1688,10 @@ def plot_trace(result, filestem, penalized_names=None):
     ----------
     result : MCMC or _SamplesResult
         Fitted model.
+    N : int
+        Number of observations.
+    p : float
+        Proportion of cases (y == 1).
     filestem : str
         Output file prefix.
     penalized_names : list of str, optional
@@ -1687,7 +1703,7 @@ def plot_trace(result, filestem, penalized_names=None):
         Path to the saved PDF.
     """
     chain_samples = result.get_samples(group_by_chain=True)
-    m_eff_ch = _m_eff_from_chain_samples(chain_samples)
+    m_eff_ch = _m_eff_from_chain_samples(chain_samples, N, p)
 
     data = {
         "tau": np.array(chain_samples["tau"]),
@@ -1720,7 +1736,7 @@ def plot_trace(result, filestem, penalized_names=None):
     return outpath
 
 
-def plot_autocorr(result, filestem, penalized_names=None):
+def plot_autocorr(result, N, p, filestem, penalized_names=None):
     """Autocorrelation plot for tau, eta, m_eff and top 3 penalized betas.
 
     Uses chain 0 only.  Saves the figure to ``{filestem}_autocorr.pdf``.
@@ -1729,6 +1745,10 @@ def plot_autocorr(result, filestem, penalized_names=None):
     ----------
     result : MCMC or _SamplesResult
         Fitted model.
+    N : int
+        Number of observations.
+    p : float
+        Proportion of cases (y == 1).
     filestem : str
         Output file prefix.
     penalized_names : list of str, optional
@@ -1740,7 +1760,7 @@ def plot_autocorr(result, filestem, penalized_names=None):
         Path to the saved PDF.
     """
     chain_samples = result.get_samples(group_by_chain=True)
-    m_eff_ch = _m_eff_from_chain_samples(chain_samples)
+    m_eff_ch = _m_eff_from_chain_samples(chain_samples, N, p)
 
     # Use only chain 0: keep shape (1, num_samples, ...) for arviz
     data = {
@@ -2289,6 +2309,10 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
             f"y_col '{y_col}' must be binary (0/1), "
             f"got unique values: {unique_y}")
 
+    n_cases = int(y.sum())
+    n_controls = int(len(y) - n_cases)
+    p_cases = float(y.mean())
+
     N, J = X.shape
 
     # Standardize penalized covariates; centre unpenalized covariates
@@ -2297,10 +2321,9 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         X_std = X.std(axis=0)
         X_std[X_std == 0] = 1.0  # avoid division by zero for constant cols
         X = (X - X_mean) / X_std
+        print("Penalized covariates standardized to zero mean, unit variance")
         if X_u_raw.shape[1] > 0:
             X_u_raw = X_u_raw - X_u_raw.mean(axis=0)
-        print("Penalized covariates standardized to zero mean, unit variance")
-        if unpenalized_cols:
             print("Unpenalized covariates centred to zero mean")
 
     intercept_col = np.ones((N, 1), dtype=np.float32)
@@ -2319,16 +2342,12 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
                 fraction_nonzero = p0 / J
             else:
                 fraction_nonzero = 0.25
-        p_cases = float(y.mean())
         # tau0 = f0/(1-f0) / sqrt(I), where I = N*p*(1-p) for logistic regression
         # with standardized covariates (Piironen & Vehtari 2017; mrhevo theory)
         scale_global = (fraction_nonzero / (1 - fraction_nonzero)
                         / np.sqrt(N * p_cases * (1 - p_cases)))
         print(f"scale_global estimated: fraction_nonzero={fraction_nonzero:.3f}, "
               f"scale_global={scale_global:.4f}")
-
-    n_cases = int(y.sum())
-    n_controls = int(len(y) - n_cases)
 
     if crossvalidate_:
         # --- K-fold CV ---
@@ -2419,9 +2438,9 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
 
     # --- 5. In-sample diagnostics ---
     unpenalized_names = ["Intercept"] + list(unpenalized_cols)
-    posterior_summary(result, filestem + "_summary.csv",
-                   unpenalized_names=unpenalized_names,
-                   penalized_names=list(penalized_cols))
+    posterior_summary(result, N, p_cases, filepath=filestem + "_summary.csv",
+                      unpenalized_names=unpenalized_names,
+                      penalized_names=list(penalized_cols))
 
     # posterior mean betas and forest plot
     samples = result.get_samples()
@@ -2433,7 +2452,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
     eta = samples["eta"][:, None]
     lambda_raw = samples["aux1_local"] * jnp.sqrt(samples["aux2_local"])
     lambda_tilde_sq = (eta**2 * lambda_raw**2) / (eta**2 + tau**2 * lambda_raw**2)
-    kappa = 1.0 / (1.0 + tau**2 * lambda_tilde_sq)
+    kappa = 1.0 / (1.0 + tau**2 * lambda_tilde_sq * N * p_cases * (1 - p_cases))
     f_eff = (1.0 - kappa).sum(axis=1) / J
     print(f"\nPosterior f_eff:  mean={float(f_eff.mean()):.3f}  "
           f"median={float(jnp.median(f_eff)):.3f}  "
@@ -2463,9 +2482,9 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
     if is_nuts:
         plot_pair_diagnostic(result, filestem)
     else:
-        plot_pairs(result, filestem)
-        plot_trace(result, filestem, penalized_names=list(penalized_cols))
-        plot_autocorr(result, filestem, penalized_names=list(penalized_cols))
+        plot_pairs(result, N, p_cases, filestem)
+        plot_trace(result, N, p_cases, filestem, penalized_names=list(penalized_cols))
+        plot_autocorr(result, N, p_cases, filestem, penalized_names=list(penalized_cols))
     plot_wevid(w, filestem)
 
     # --- 6. Projpred ---
@@ -2495,5 +2514,3 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         "beta_hat": beta_hat, "f_eff": np.array(f_eff),
         "insample": insample, "projpred": projpred_result,
     }
-
-
