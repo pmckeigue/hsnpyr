@@ -72,25 +72,9 @@ def main():
           f"90% CI=[{float(jnp.percentile(f_eff, 5)):.3f}, "
           f"{float(jnp.percentile(f_eff, 95)):.3f}]")
 
-    # Learning curve: info for discrimination vs training size
-    train_sizes, info_values, cv_results = hs.learning_curve(
-        X_u, X, y, K_values=(2, 3, 4, 5),
-        slab_scale=2.0, slab_df=4.0, scale_global=scale_global,
-        num_warmup=500, num_samples=500, num_chains=2, rng_seed=0,
-    )
-    outpath3 = hs.plot_learning_curve(train_sizes, info_values, "hslogistic")
-    print(f"Plot saved to {outpath3}")
 
-    outpath2 = hs.plot_pair_diagnostic(mcmc, "hslogistic")
-    print(f"Plot saved to {outpath2}")
-
-    cv_result = cv_results[-1]  # reuse the K=5 result from the learning curve
-    outpath1 = hs.plot_wevid(cv_result["wevid"], "hslogistic_cv")
-    print(f"Plot saved to {outpath1}")
-
-    outpath0 = hs.plot_probs(cv_result["y"], cv_result["probs"], "hslogistic_cv",
-                             xlabel="Predicted probabilities (5-fold CV)")
-    print(f"Plot saved to {outpath0}")
+    outpath = hs.plot_pair_diagnostic(mcmc, "hslogistic")
+    print(f"Plot saved to {outpath}")
 
     # Projection predictive forward search
     print("\n" + "=" * 60)
@@ -147,6 +131,18 @@ def main():
         rng_seed=0, projpred_V=5,
     )
     print(f"\nrun_analysis returned keys: {sorted(out.keys())}")
+
+    cv_out = hs.run_analysis(
+        df, y_col="outcome",
+        unpenalized_cols=[],
+        penalized_cols=penalized_names,
+        filestem="hslogistic_ra_cv",
+        slab_scale=2.0, slab_df=4.0, fraction_nonzero=0.2,
+        sampler="nuts", crossvalidate_=True, fit_learning_curve=True,
+        num_warmup=500, num_samples=500, num_chains=2,
+        rng_seed=0,
+    )
+    print(f"\nrun_analysis with crossvalidate and learning path set to True returned keys: {sorted(cv_out.keys())}")
 
 
 if __name__ == "__main__":
