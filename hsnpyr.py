@@ -1277,18 +1277,21 @@ def posterior_summary(mcmc, N, p, filepath=None, unpenalized_names=None,
     """
     chain_samples = mcmc.get_samples(group_by_chain=True)
 
-    def _row(name, x_chain, kappa_val=None):
+    def _row(name, x_chain, lambda_raw_val=None, lambda_tilde_val=None,
+             kappa_old_val=None, kappa_val=None):
         x_flat = x_chain.reshape(-1)
-        d = {
-            "parameter": name,
-            "kappa": kappa_val if kappa_val is not None else "",
-            "mean": float(jnp.mean(x_flat)),
-            "q0.03": float(jnp.percentile(x_flat, 3)),
-            "q0.97": float(jnp.percentile(x_flat, 97)),
-            "n_eff": float(effective_sample_size(np.array(x_chain))),
-            "r_hat": float(split_gelman_rubin(np.array(x_chain))),
+        return {
+            "parameter":        name,
+            "lambda_raw":       lambda_raw_val   if lambda_raw_val   is not None else "",
+            "lambda_tilde":     lambda_tilde_val if lambda_tilde_val is not None else "",
+            "kappa_old_formula": kappa_old_val   if kappa_old_val    is not None else "",
+            "kappa":            kappa_val        if kappa_val        is not None else "",
+            "beta_mean":        float(jnp.mean(x_flat)),
+            "beta_q0.025":      float(jnp.percentile(x_flat, 2.5)),
+            "beta_q0.975":      float(jnp.percentile(x_flat, 97.5)),
+            "n_eff":            float(effective_sample_size(np.array(x_chain))),
+            "r_hat":            float(split_gelman_rubin(np.array(x_chain))),
         }
-        return d
 
     # Compute shrinkage factors per covariate (kappa_j)
     tau_ch = chain_samples["tau"][..., None]     # (chains, samples, 1)
@@ -1297,8 +1300,15 @@ def posterior_summary(mcmc, N, p, filepath=None, unpenalized_names=None,
                   * jnp.sqrt(chain_samples["aux2_local"]))
     lambda_tilde_sq = ((eta_ch ** 2 * lambda_raw ** 2)
                        / (eta_ch ** 2 + tau_ch ** 2 * lambda_raw ** 2))
-    kappa_all = 1.0 / (1.0 + tau_ch ** 2 * lambda_tilde_sq * N * p * (1 - p))  # (chains, S, J)
-    kappa_mean = np.array(kappa_all.reshape(-1, kappa_all.shape[-1]).mean(axis=0))
+    lambda_tilde = jnp.sqrt(lambda_tilde_sq)
+    kappa_old_all = 1.0 / (1.0 + tau_ch ** 2 * lambda_tilde_sq)              # (chains, S, J)
+    kappa_all     = 1.0 / (1.0 + tau_ch ** 2 * lambda_tilde_sq * N * p * (1 - p))  # (chains, S, J)
+    def flat(arr):
+        return arr.reshape(-1, arr.shape[-1])
+    lambda_raw_mean   = np.array(flat(lambda_raw).mean(axis=0))
+    lambda_tilde_mean = np.array(flat(lambda_tilde).mean(axis=0))
+    kappa_old_mean    = np.array(flat(kappa_old_all).mean(axis=0))
+    kappa_mean        = np.array(flat(kappa_all).mean(axis=0))
 
     # f_eff: effective fraction of nonzero coefficients
     J_inf = kappa_all.shape[-1]
@@ -1325,8 +1335,13 @@ def posterior_summary(mcmc, N, p, filepath=None, unpenalized_names=None,
         penalized_rows = []
         for idx in sorted_idx:
             label = penalized_names[idx] if penalized_names is not None else f"beta[{idx}]"
-            penalized_rows.append(_row(label, beta_chain[..., idx],
-                                       kappa_val=round(float(kappa_mean[idx]), 4)))
+            penalized_rows.append(_row(
+                label, beta_chain[..., idx],
+                lambda_raw_val=round(float(lambda_raw_mean[idx]), 4),
+                lambda_tilde_val=round(float(lambda_tilde_mean[idx]), 4),
+                kappa_old_val=round(float(kappa_old_mean[idx]), 4),
+                kappa_val=round(float(kappa_mean[idx]), 4),
+            ))
 
     # Display: header rows + top-5 penalized
     display_df = pd.DataFrame(rows + penalized_rows[:5])
