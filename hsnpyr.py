@@ -2383,7 +2383,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
 
     # --- 5. In-sample diagnostics ---
     unpenalized_names = ["Intercept"] + list(unpenalized_cols)
-    posterior_summary(result, N, p_cases, filepath=filestem + "_summary.csv",
+    posterior_summary(result, N, p_cases, filepath=filestem + "_posterior_summary.csv",
                       unpenalized_names=unpenalized_names,
                       penalized_names=list(penalized_cols))
 
