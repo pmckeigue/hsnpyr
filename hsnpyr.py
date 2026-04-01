@@ -2501,6 +2501,11 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
             print(f"  {i+1}. {penalized_cols[j]} (index {j})")
         plot_projpred(selected, kl_path, kl_null, filestem,
                       var_names=list(penalized_cols))
+        rows = [{"variable": "null", "KL_div": kl_null, "prop_explained": 0.0}]
+        for j, kl in zip(selected, kl_path):
+            rows.append({"variable": penalized_cols[j], "KL_div": kl,
+                         "prop_explained": 1.0 - kl / kl_null})
+        pd.DataFrame(rows).to_csv(f"{filestem}_solutionpath.csv", index=False)
         projpred_result = {"selected": selected, "kl_path": kl_path,
                            "kl_null": kl_null,
                            "selected_names": [penalized_cols[j] for j in selected]}
