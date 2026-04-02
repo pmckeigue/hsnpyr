@@ -2366,7 +2366,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
                     "num_controls": round(n_controls * (K - 1) / K),
                     "comp_time": comp_t,
                 })
-            pd.DataFrame(cv_summary_rows).to_csv(
+            pd.DataFrame(cv_summary_rows).round({"C_stat": 4, "log_Lik": 0, "comp_time": 0}).to_csv(
                 f"{filestem}_cv_performance.csv", index=False)
 
         else:
@@ -2378,7 +2378,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
                 "num_cases": round(n_cases * (cv_K - 1) / cv_K),
                 "num_controls": round(n_controls * (cv_K - 1) / cv_K),
                 "comp_time": cv_comp_time,
-            }]).to_csv(f"{filestem}_cv_performance.csv", index=False)
+            }]).round({"C_stat": 4, "log_Lik": 0, "comp_time": 0}).to_csv(f"{filestem}_cv_performance.csv", index=False)
 
         return out
 
@@ -2476,7 +2476,7 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         for j, kl in zip(selected, kl_path):
             rows.append({"variable": penalized_cols[j], "KL_div": kl,
                          "prop_explained": 1.0 - kl / kl_null})
-        pd.DataFrame(rows).to_csv(f"{filestem}_solutionpath.csv", index=False)
+        pd.DataFrame(rows).round({"KL_div": 2, "prop_explained": 2}).to_csv(f"{filestem}_solutionpath.csv", index=False)
         projpred_result = {"selected": selected, "kl_path": kl_path,
                            "kl_null": kl_null,
                            "selected_names": [penalized_cols[j] for j in selected]}
