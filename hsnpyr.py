@@ -1537,17 +1537,30 @@ def plot_forest(beta_samples, penalized_names, filestem):
     fig, ax = plt.subplots(figsize=(5, max(2, 0.25 * n_show)))
     y_pos = np.arange(n_show)
     ax.axvline(0, color="grey", linewidth=0.8, linestyle="--")
-    ax.errorbar(beta_mean, y_pos,
-                xerr=[beta_mean - beta_lo, beta_hi - beta_mean],
-                fmt="o", color="steelblue", ecolor="steelblue",
-                elinewidth=1.5, capsize=2, markersize=3)
+    try:
+        ax.errorbar(beta_mean, y_pos,
+                    xerr=[beta_mean - beta_lo, beta_hi - beta_mean],
+                    fmt="o", color="steelblue", ecolor="steelblue",
+                    elinewidth=1.5, capsize=2, markersize=3)
+        ax.set_title("Top penalized betas (posterior mean, 90% CI)", fontsize=9)
+        outpath = filestem + "_forest.pdf"
+    except ValueError:
+        plt.close(fig)
+        beta_median = np.array(jnp.percentile(beta_samples, 50, axis=0))[order]
+        fig, ax = plt.subplots(figsize=(5, max(2, 0.25 * n_show)))
+        y_pos = np.arange(n_show)
+        ax.axvline(0, color="grey", linewidth=0.8, linestyle="--")
+        ax.errorbar(beta_median, y_pos,
+                    xerr=[beta_median - beta_lo, beta_hi - beta_median],
+                    fmt="o", color="steelblue", ecolor="steelblue",
+                    elinewidth=1.5, capsize=2, markersize=3)
+        ax.set_title("Top penalized betas (posterior median, 90% CI)", fontsize=9)
+        outpath = filestem + "_forest_median.pdf"
     ax.set_yticks(y_pos)
     ax.set_yticklabels(names, fontsize=8)
     ax.set_ylim(-0.5, n_show - 0.5)
     ax.set_xlabel("Log odds ratio")
-    ax.set_title("Top penalized betas (posterior mean, 90% CI)", fontsize=9)
     fig.tight_layout()
-    outpath = filestem + "_forest.pdf"
     fig.savefig(outpath)
     plt.show()
     plt.close(fig)
