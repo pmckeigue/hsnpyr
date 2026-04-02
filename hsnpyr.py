@@ -1970,6 +1970,14 @@ def projpred_forward_search(result, X_u, X, V=5, prescreen_k=50):
     # reference probabilities: average expit(logodds) over posterior samples
     logodds = np.asarray(result.get_samples()["logodds"])
     mu = expit(logodds).mean(axis=0)
+    if np.any(np.isnan(mu)):
+        raise ValueError(
+            f"projpred_forward_search: posterior mean probabilities (mu) contain "
+            f"{np.isnan(mu).sum()} NaN values out of {len(mu)}. "
+            "This likely indicates NaN logodds samples from the NUTS sampler due to "
+            "numerical overflow (e.g. near-complete separation). "
+            "Check the posterior samples for divergences or extreme values."
+        )
 
     # null-model KL (unpenalized covariates only)
     w_base, kl_null = _project_onto_submodel(mu, X_u)
@@ -2008,6 +2016,12 @@ def projpred_forward_search(result, X_u, X, V=5, prescreen_k=50):
                 best_kl = kl
                 best_j = j
                 best_w = w
+        if best_j is None:
+            raise ValueError(
+                f"projpred_forward_search: no valid candidate found at step {v+1}. "
+                "All candidate KL divergences were NaN or non-finite. "
+                "Check for NaN/Inf in the design matrix or posterior samples."
+            )
         selected.append(best_j)
         remaining.remove(best_j)
         kl_path.append(best_kl)
@@ -2477,9 +2491,16 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
         print("\n" + "=" * 60)
         print("Projection predictive forward search")
         print("=" * 60)
-        selected, kl_path, kl_null = projpred_forward_search(
-            result, X_u, X, V=projpred_V,
-        )
+        try:
+            selected, kl_path, kl_null = projpred_forward_search(
+                result, X_u, X, V=projpred_V,
+            )
+        except ValueError:
+            idata = az.from_numpyro(result)
+            idata_path = filestem + "_idata.nc"
+            idata.to_netcdf(idata_path)
+            print(f"ArviZ InferenceData saved to {idata_path} for diagnostics.")
+            raise
         print(f"\nSelected covariates (in order):")
         for i, j in enumerate(selected):
             print(f"  {i+1}. {penalized_cols[j]} (index {j})")
