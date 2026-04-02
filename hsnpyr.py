@@ -2369,6 +2369,17 @@ def run_analysis(df, y_col, unpenalized_cols, penalized_cols, filestem,
             pd.DataFrame(cv_summary_rows).to_csv(
                 f"{filestem}_cv_performance.csv", index=False)
 
+        else:
+            pd.DataFrame([{
+                "K": cv_K,
+                "C_stat": cv_result["c_stat"],
+                "discrim_info": cv_result["info_discrim"],
+                "log_Lik": cv_result["log_score"],
+                "num_cases": round(n_cases * (cv_K - 1) / cv_K),
+                "num_controls": round(n_controls * (cv_K - 1) / cv_K),
+                "comp_time": cv_comp_time,
+            }]).to_csv(f"{filestem}_cv_performance.csv", index=False)
+
         return out
 
     # --- 3. Fit full model ---
